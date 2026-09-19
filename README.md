@@ -1,3 +1,7 @@
+download
+
+[Download RobloxWatchdog.exe](https://github.com/FloSoftwareDev/roblox-watchdog/releases/latest/download/RobloxWatchdog.exe)
+
 what it does
 
 launches your alts into the private server through Roblox Account Manager (RAM)
