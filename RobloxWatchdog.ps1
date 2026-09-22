@@ -105,6 +105,7 @@ function Get-DefaultSettings
         RelaunchDelaySeconds   = "90"
         MaximumSessionMinutes  = "45"
         CloseOtherClients      = "True"
+        FramerateCap           = "30"
     }
 }
 
@@ -224,6 +225,7 @@ function Show-SettingsWindow($saved)
     Add-Row "Kill an alt below free MB" "MinimumFreeMegabytes" 20 $false
     Add-Row "Seconds between launches" "RelaunchDelaySeconds" 20 $false
     Add-Row "Relog alts after minutes" "MaximumSessionMinutes" 20 $false
+    Add-Row "Roblox frame rate cap (0=off)" "FramerateCap" 20 $false
 
     # Closing other clients is destructive, so it is a deliberate choice
     $closeOthersBox = New-Object System.Windows.Forms.CheckBox
@@ -291,6 +293,11 @@ function Test-Settings($settings)
     if ([int]$settings.MinimumFreeMegabytes -lt 100) { throw "Kill an alt below free MB must be at least 100" }
     if ([int]$settings.RelaunchDelaySeconds -lt 5)   { throw "Seconds between launches must be at least 5" }
     if ([int]$settings.MaximumSessionMinutes -lt 5)  { throw "Relog alts after minutes must be at least 5" }
+
+    # 0 leaves Roblox's own setting alone; otherwise keep it in a sane range
+    if ($settings.FramerateCap -notmatch '^\d{1,3}$') { throw "Frame rate cap must be a number (0 to leave it alone)" }
+    $cap = [int]$settings.FramerateCap
+    if ($cap -ne 0 -and ($cap -lt 15 -or $cap -gt 360)) { throw "Frame rate cap must be 0, or between 15 and 360" }
 }
 
 # Reopen the window on a bad value instead of throwing away everything that was typed
@@ -321,6 +328,7 @@ $minimumFreeMegabytes = [int]$settings.MinimumFreeMegabytes
 $relaunchDelaySeconds = [int]$settings.RelaunchDelaySeconds
 $maximumSessionMinutes = [int]$settings.MaximumSessionMinutes
 $closeOtherClients = ($settings.CloseOtherClients -ne "False")
+$framerateCap = [int]$settings.FramerateCap
 
 # ---- Watchdog ----------------------------------------------------------------------
 
@@ -337,6 +345,30 @@ function Get-FreeMegabytes
     $performance = Get-CimInstance Win32_PerfRawData_PerfOS_Memory -ErrorAction SilentlyContinue
     if ($performance -and $performance.AvailableMBytes) { return [double]$performance.AvailableMBytes }
     return (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).FreePhysicalMemory / 1024
+}
+
+function Set-RobloxFramerateCap
+{
+    # Roblox reads this once at client startup and rewrites the file when a client
+    # exits, so a closing client resets it to unlimited; reassert it before launching
+    if ($framerateCap -le 0) { return }
+    $path = Join-Path $env:LOCALAPPDATA "Roblox\GlobalBasicSettings_13.xml"
+    if (-not (Test-Path $path)) { return }
+    try
+    {
+        $raw = [System.IO.File]::ReadAllText($path)
+        $new = [regex]::Replace($raw, '(<int name="FramerateCap">)(-?\d+)(</int>)', "`${1}$framerateCap`${3}")
+        if ($new -ne $raw)
+        {
+            # written back exactly as Roblox writes it: UTF-8 without BOM
+            [System.IO.File]::WriteAllText($path, $new, (New-Object System.Text.UTF8Encoding($false)))
+            Write-Log "set Roblox frame rate cap to $framerateCap"
+        }
+    }
+    catch
+    {
+        Write-Log "WARNING: could not set the frame rate cap: $($_.Exception.Message)"
+    }
 }
 
 function Get-SessionProcess($session)
@@ -537,6 +569,7 @@ function Get-DisconnectReason($session)
 function Start-Session($accountName)
 {
     $session = $sessions[$accountName]
+    Set-RobloxFramerateCap                                                            # a client that just closed may have reset it
     $launchTime = Get-Date                                                            # log files after this are new
     $process = Start-Client $accountName
 
@@ -596,6 +629,7 @@ foreach ($accountName in $allAccounts)
 }
 
 Write-Log "watchdog started, settings in $settingsPath, log in $logFilePath"
+Set-RobloxFramerateCap
 Write-Log "will kill the largest alt below $minimumFreeMegabytes MB available (now $([int](Get-FreeMegabytes)) MB)"
 
 # A running client is adopted as main; everything else is untracked and closed
