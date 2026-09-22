@@ -12,6 +12,10 @@
 # Aanpassing   Datum   Project Pgmr   Omschrijving
 # 001          19-09-2026 Miniwar AFK FG  Password verplicht, fallback zonder LinkCode verwijderd, RAM-antwoord loggen, nieuw venster is de succescontrole, volledige private server link via JobId
 # 002          21-09-2026 Miniwar AFK FG  Disconnect-detectie via Roblox logbestanden, main wordt ook herstart en getegeld (slot 0)
+# 003          22-09-2026 Miniwar AFK FG  Security: instellingen naar LOCALAPPDATA, wachtwoord versleuteld (DPAPI),
+#                                         bestandsrechten dichtgezet, private server link gevalideerd, PID-hergebruik afgevangen.
+#                                         Robuustheid: fouten in de lus niet meer fataal, backoff na mislukte launches,
+#                                         HTTP-timeout, logbestand, afgeknot logbestand afgevangen.
 #
 #------------------------------------------------------------------------------------#
 
@@ -22,10 +26,20 @@ Add-Type -AssemblyName System.Net.Http
 $processName = "RobloxPlayerBeta"
 $minimumClientBytes = 500MB
 $checkIntervalSeconds = 10
+$maximumLaunchFailures = 5                                                           # log loudly after this many failed launches in a row
 $logFolder = Join-Path $env:LOCALAPPDATA "Roblox\logs"                              # Roblox client log files
 $disconnectPattern = "Sending disconnect with reason: (\d+)"                         # logged on drop (277) and leave (285)
+$ignoredDisconnectReasons = @()                                                      # e.g. @("285") to ignore a normal leave/teleport
 $httpClient = New-Object System.Net.Http.HttpClient
-$settingsPath = Join-Path (Split-Path -Parent ([Environment]::GetCommandLineArgs()[0])) "RobloxWatchdog.json"
+$httpClient.Timeout = [TimeSpan]::FromSeconds(15)                                    # never let a hung RAM freeze the watchdog
+
+# Settings live in LOCALAPPDATA, not next to the script: when run as a .ps1 the old
+# path resolved to the PowerShell install folder under System32
+$scriptFolder = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent ([Environment]::GetCommandLineArgs()[0]) }
+$settingsFolder = Join-Path $env:LOCALAPPDATA "RobloxWatchdog"
+$settingsPath = Join-Path $settingsFolder "RobloxWatchdog.json"
+$legacySettingsPath = Join-Path $scriptFolder "RobloxWatchdog.json"                  # pre-003 location, migrated on first run
+$logFilePath = Join-Path $settingsFolder "RobloxWatchdog.log"
 
 trap
 {
@@ -34,39 +48,138 @@ trap
     exit 1
 }
 
+function Write-Log($message)
+{
+    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $message"
+    Write-Host $line
+    try
+    {
+        if ((Test-Path $logFilePath) -and (Get-Item $logFilePath).Length -gt 5MB)
+        {
+            Move-Item $logFilePath "$logFilePath.old" -Force
+        }
+        Add-Content -Path $logFilePath -Value $line -Encoding UTF8 -ErrorAction Stop
+    }
+    catch
+    {
+        # console output is enough; logging must never take the watchdog down
+    }
+}
+
 # ---- Settings window ---------------------------------------------------------------
+
+function Protect-Secret($plainText)
+{
+    # DPAPI: the ciphertext only decrypts for this Windows user on this machine
+    if (-not $plainText) { return "" }
+    return ConvertFrom-SecureString (ConvertTo-SecureString $plainText -AsPlainText -Force)
+}
+
+function Unprotect-Secret($protectedText)
+{
+    if (-not $protectedText) { return "" }
+    try
+    {
+        $secure = ConvertTo-SecureString $protectedText
+        $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+        try     { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer) }
+        finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer) }
+    }
+    catch
+    {
+        Write-Host "WARNING: the saved password could not be decrypted, please type it again" -ForegroundColor Yellow
+        return ""
+    }
+}
+
+function Get-DefaultSettings
+{
+    return @{
+        MainAccount            = ""
+        AltAccounts            = ""
+        PlaceId                = ""
+        PrivateServerLink      = ""
+        AccountManagerPort     = "7963"
+        AccountManagerPassword = ""
+        MinimumFreeMegabytes   = "3000"
+        RelaunchDelaySeconds   = "90"
+        MaximumSessionMinutes  = "45"
+        CloseOtherClients      = "True"
+    }
+}
 
 function Get-SavedSettings
 {
-    if (-not (Test-Path $settingsPath))
-    {
-        return @{
-            MainAccount            = ""
-            AltAccounts            = ""
-            PlaceId                = ""
-            PrivateServerLink      = ""
-            AccountManagerPort     = "7963"
-            AccountManagerPassword = ""
-            MinimumFreeMegabytes   = "3000"
-            RelaunchDelaySeconds   = "90"
-            MaximumSessionMinutes  = "45"
-        }
-    }
+    # Saved values are laid over the defaults, so a file written by an older version
+    # keeps sensible defaults for keys it does not have yet
+    $settings = Get-DefaultSettings
 
-    $json = Get-Content $settingsPath -Raw | ConvertFrom-Json
-    $settings = @{}
+    $path = if (Test-Path $settingsPath) { $settingsPath }
+            elseif (Test-Path $legacySettingsPath) { $legacySettingsPath }
+            else { $null }
+    if (-not $path) { return $settings }
+
+    $json = Get-Content $path -Raw | ConvertFrom-Json
     foreach ($property in $json.PSObject.Properties)
     {
         $settings[$property.Name] = [string]$property.Value
     }
+
+    if ($settings["AccountManagerPasswordProtected"])
+    {
+        $settings["AccountManagerPassword"] = Unprotect-Secret $settings["AccountManagerPasswordProtected"]
+    }
+    $settings.Remove("AccountManagerPasswordProtected")
     return $settings
+}
+
+function Protect-SettingsFile($path)
+{
+    # Owner only, inheritance off: the file holds the encrypted password
+    try
+    {
+        $acl = New-Object System.Security.AccessControl.FileSecurity
+        $acl.SetAccessRuleProtection($true, $false)
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            [Security.Principal.WindowsIdentity]::GetCurrent().User, "FullControl", "Allow")))
+        Set-Acl -Path $path -AclObject $acl -ErrorAction Stop
+    }
+    catch
+    {
+        Write-Log "WARNING: could not restrict permissions on $path : $($_.Exception.Message)"
+    }
+}
+
+function Save-Settings($settings)
+{
+    $toSave = @{}
+    foreach ($key in $settings.Keys)
+    {
+        if ($key -eq "AccountManagerPassword") { continue }
+        $toSave[$key] = $settings[$key]
+    }
+    $toSave["AccountManagerPasswordProtected"] = Protect-Secret $settings.AccountManagerPassword
+
+    if (-not (Test-Path $settingsFolder))
+    {
+        New-Item -ItemType Directory -Path $settingsFolder -Force | Out-Null
+    }
+    $toSave | ConvertTo-Json | Set-Content $settingsPath -Encoding UTF8
+    Protect-SettingsFile $settingsPath
+
+    # The old file kept the password in clear text, so it does not stay behind
+    if ((Test-Path $legacySettingsPath) -and ($legacySettingsPath -ne $settingsPath))
+    {
+        Remove-Item $legacySettingsPath -Force -ErrorAction SilentlyContinue
+        Write-Log "settings moved to $settingsPath, removed the old plain text $legacySettingsPath"
+    }
 }
 
 function Show-SettingsWindow($saved)
 {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Roblox Watchdog"
-    $form.Size = New-Object System.Drawing.Size(460, 500)
+    $form.Size = New-Object System.Drawing.Size(460, 560)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
@@ -112,6 +225,15 @@ function Show-SettingsWindow($saved)
     Add-Row "Seconds between launches" "RelaunchDelaySeconds" 20 $false
     Add-Row "Relog alts after minutes" "MaximumSessionMinutes" 20 $false
 
+    # Closing other clients is destructive, so it is a deliberate choice
+    $closeOthersBox = New-Object System.Windows.Forms.CheckBox
+    $closeOthersBox.Text = "Close other Roblox windows on start"
+    $closeOthersBox.Location = New-Object System.Drawing.Point(190, $rowTop)
+    $closeOthersBox.Size = New-Object System.Drawing.Size(240, 20)
+    $closeOthersBox.Checked = ($saved["CloseOtherClients"] -ne "False")
+    $form.Controls.Add($closeOthersBox)
+    $rowTop += 30
+
     $note = New-Object System.Windows.Forms.Label
     $note.Text = "A running client is adopted as main; otherwise main is launched."
     $note.Location = New-Object System.Drawing.Point(15, $rowTop)
@@ -136,6 +258,7 @@ function Show-SettingsWindow($saved)
     {
         $result[$key] = $inputs[$key].Text.Trim()
     }
+    $result["CloseOtherClients"] = [string]$closeOthersBox.Checked
     return $result
 }
 
@@ -147,18 +270,46 @@ function Test-Settings($settings)
     {
         throw "Main username must not also be in the alt list"
     }
-    if ($settings.PlaceId -notmatch '^\d+$') { throw "Place ID must be a number" }
-    if ($settings.AccountManagerPort -notmatch '^\d+$') { throw "Port must be a number" }
+    if ($settings.PlaceId -notmatch '^\d{1,19}$') { throw "Place ID must be a number" }
+    if ($settings.AccountManagerPort -notmatch '^\d{1,5}$') { throw "Port must be a number" }
+    if ([int]$settings.AccountManagerPort -lt 1 -or [int]$settings.AccountManagerPort -gt 65535)
+    {
+        throw "Port must be between 1 and 65535"
+    }
     if ($settings.AccountManagerPassword.Length -lt 6) { throw "RAM password must match the Webserver Password in RAM (RAM requires 6+ characters for LaunchAccount)" }
+
+    # The link is handed straight to RAM, so only accept a real Roblox one
+    if ($settings.PrivateServerLink -and $settings.PrivateServerLink -notmatch '^https://(www\.)?roblox\.com/')
+    {
+        throw "Private server link must start with https://www.roblox.com/ (paste the full share link)"
+    }
+
     foreach ($key in "MinimumFreeMegabytes", "RelaunchDelaySeconds", "MaximumSessionMinutes")
     {
-        if ($settings[$key] -notmatch '^\d+$') { throw "$key must be a number" }
+        if ($settings[$key] -notmatch '^\d{1,9}$') { throw "$key must be a number" }
     }
+    if ([int]$settings.MinimumFreeMegabytes -lt 100) { throw "Kill an alt below free MB must be at least 100" }
+    if ([int]$settings.RelaunchDelaySeconds -lt 5)   { throw "Seconds between launches must be at least 5" }
+    if ([int]$settings.MaximumSessionMinutes -lt 5)  { throw "Relog alts after minutes must be at least 5" }
 }
 
-$settings = Show-SettingsWindow (Get-SavedSettings)
-Test-Settings $settings
-$settings | ConvertTo-Json | Set-Content $settingsPath
+# Reopen the window on a bad value instead of throwing away everything that was typed
+$settings = Get-SavedSettings
+while ($true)
+{
+    $settings = Show-SettingsWindow $settings
+    try
+    {
+        Test-Settings $settings
+        break
+    }
+    catch
+    {
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Check your settings",
+            [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+    }
+}
+Save-Settings $settings
 
 $mainAccount = $settings.MainAccount
 $altAccounts = $settings.AltAccounts -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
@@ -169,13 +320,9 @@ $accountManagerPassword = $settings.AccountManagerPassword
 $minimumFreeMegabytes = [int]$settings.MinimumFreeMegabytes
 $relaunchDelaySeconds = [int]$settings.RelaunchDelaySeconds
 $maximumSessionMinutes = [int]$settings.MaximumSessionMinutes
+$closeOtherClients = ($settings.CloseOtherClients -ne "False")
 
 # ---- Watchdog ----------------------------------------------------------------------
-
-function Write-Log($message)
-{
-    Write-Host "$(Get-Date -Format HH:mm:ss) $message"
-}
 
 function Get-RobloxClients
 {
@@ -185,7 +332,21 @@ function Get-RobloxClients
 
 function Get-FreeMegabytes
 {
-    (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1024
+    # AvailableMBytes matches the "Available" figure in Task Manager; the raw perf class
+    # is used instead of a PerformanceCounter because those category names are localised
+    $performance = Get-CimInstance Win32_PerfRawData_PerfOS_Memory -ErrorAction SilentlyContinue
+    if ($performance -and $performance.AvailableMBytes) { return [double]$performance.AvailableMBytes }
+    return (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).FreePhysicalMemory / 1024
+}
+
+function Get-SessionProcess($session)
+{
+    # Windows recycles PIDs, so the start time has to match before we trust the id
+    if (-not $session.ProcessId) { return $null }
+    $process = Get-Process -Id $session.ProcessId -ErrorAction SilentlyContinue
+    if (-not $process -or $process.ProcessName -ne $processName) { return $null }
+    if ($session.ProcessStartTime -and $process.StartTime -ne $session.ProcessStartTime) { return $null }
+    return $process
 }
 
 Add-Type -Namespace Win32 -Name Window -MemberDefinition @"
@@ -208,7 +369,9 @@ function Set-ClientWindow($processId, $slotIndex)
     }
     if (-not $process -or $process.MainWindowHandle -eq 0)
     {
-        throw "Client PID $processId never showed a window"
+        # Tiling is cosmetic: a client without a window keeps running, just untiled
+        Write-Log "WARNING: client PID $processId never showed a window, leaving it untiled"
+        return
     }
 
     # Roblox restores its own saved size right after the window appears; move after that
@@ -242,8 +405,16 @@ function Invoke-AccountManager($url)
     # RAM answers LaunchAccount with 400 even when the launch works, so the status code
     # is only logged; the new Roblox window in Start-Client is the real success check
     Write-Log "RAM: $($url -replace 'Password=[^&]+', 'Password=***')"
-    $response = $httpClient.GetAsync($url).GetAwaiter().GetResult()                  # HTTP response
-    $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()           # RAM's reply text
+    try
+    {
+        $response = $httpClient.GetAsync($url).GetAwaiter().GetResult()              # HTTP response
+        $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()       # RAM's reply text
+    }
+    catch
+    {
+        # Re-thrown without the url, so the password never lands in an error message
+        throw "could not reach Roblox Account Manager on localhost:$accountManagerPort (is the web server enabled?)"
+    }
     $reply = "$([int]$response.StatusCode) '$($response.ReasonPhrase)' $body"         # status + text for logs
     Write-Log "RAM replied: $reply"
     return $reply
@@ -270,7 +441,7 @@ function Start-Client($accountName)
             if (-not $installerKilled)
             {
                 $installerKilled = $true
-                Write-Log "killed RobloxInstaller for $accountName, retrying launch"
+                Write-Log "killed RobloxInstaller for $accountName, retrying launch (a Roblox update in progress may need repairing)"
                 Start-Sleep -Milliseconds 500
                 $ramReply = Invoke-AccountManager $launchUrl
             }
@@ -281,7 +452,7 @@ function Start-Client($accountName)
             Sort-Object StartTime |
             Select-Object -First 1
 
-        if ($newClient) { return $newClient.Id }
+        if ($newClient) { return $newClient }
     }
 
     throw "No new Roblox window appeared after launching $accountName (RAM replied: $ramReply)"
@@ -289,7 +460,7 @@ function Start-Client($accountName)
 
 function Get-PlayerLogFiles
 {
-    Get-ChildItem $logFolder -Filter "*_Player_*.log"
+    Get-ChildItem $logFolder -Filter "*_Player_*.log" -ErrorAction Stop
 }
 
 function Find-NewLogFile($launchTime)
@@ -327,10 +498,24 @@ function Read-NewLogText($session)
     $stream = [System.IO.File]::Open($session.LogPath, "Open", "Read", "ReadWrite")  # log file handle
     try
     {
+        # A rotated or truncated log would otherwise leave us reading past the end forever
+        if ($session.LogOffset -gt $stream.Length)
+        {
+            Write-Log "log $(Split-Path -Leaf $session.LogPath) shrank, reading it from the start"
+            $session.LogOffset = 0
+        }
         $stream.Seek($session.LogOffset, "Begin") | Out-Null
-        $text = (New-Object System.IO.StreamReader($stream)).ReadToEnd()              # new log lines
-        $session.LogOffset = $stream.Position
-        return $text
+        $reader = New-Object System.IO.StreamReader($stream)
+        try
+        {
+            $text = $reader.ReadToEnd()                                               # new log lines
+            $session.LogOffset = $stream.Position
+            return $text
+        }
+        finally
+        {
+            $reader.Dispose()
+        }
     }
     finally
     {
@@ -342,7 +527,10 @@ function Get-DisconnectReason($session)
 {
     # Returns the Roblox disconnect code (e.g. 277, 285), or $null while still connected
     $match = [regex]::Match((Read-NewLogText $session), $disconnectPattern)          # first disconnect line
-    if ($match.Success) { return $match.Groups[1].Value }
+    if ($match.Success -and $ignoredDisconnectReasons -notcontains $match.Groups[1].Value)
+    {
+        return $match.Groups[1].Value
+    }
     return $null
 }
 
@@ -350,8 +538,23 @@ function Start-Session($accountName)
 {
     $session = $sessions[$accountName]
     $launchTime = Get-Date                                                            # log files after this are new
-    $session.ProcessId = Start-Client $accountName
-    $session.LogPath = Find-NewLogFile $launchTime
+    $process = Start-Client $accountName
+
+    # The session is only filled in once the log is found, so a half-started client
+    # is never left running untracked
+    try
+    {
+        $logPath = Find-NewLogFile $launchTime
+    }
+    catch
+    {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        throw
+    }
+
+    $session.ProcessId = $process.Id
+    $session.ProcessStartTime = $process.StartTime
+    $session.LogPath = $logPath
     $session.LogOffset = 0
     $session.StartedAt = Get-Date
     Write-Log "$accountName running as PID $($session.ProcessId), log $(Split-Path -Leaf $session.LogPath)"
@@ -371,9 +574,14 @@ function Start-Session($accountName)
 function Stop-Session($accountName, $reason)
 {
     $session = $sessions[$accountName]
-    Stop-Process -Id $session.ProcessId -Force -ErrorAction SilentlyContinue
+    $process = Get-SessionProcess $session
+    if ($process)
+    {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
     Write-Log "$accountName (PID $($session.ProcessId)) $reason, relaunching in $relaunchDelaySeconds s"
     $session.ProcessId = 0
+    $session.ProcessStartTime = $null
     $session.LogPath = $null
     $session.RelaunchAfter = (Get-Date).AddSeconds($relaunchDelaySeconds)
 }
@@ -383,71 +591,124 @@ $allAccounts = @($mainAccount) + $altAccounts
 $sessions = @{}
 foreach ($accountName in $allAccounts)
 {
-    $sessions[$accountName] = @{ ProcessId = 0; StartedAt = $null; RelaunchAfter = (Get-Date); LogPath = $null; LogOffset = 0 }
+    $sessions[$accountName] = @{ ProcessId = 0; ProcessStartTime = $null; StartedAt = $null
+                                 RelaunchAfter = (Get-Date); LogPath = $null; LogOffset = 0; FailureCount = 0 }
 }
+
+Write-Log "watchdog started, settings in $settingsPath, log in $logFilePath"
+Write-Log "will kill the largest alt below $minimumFreeMegabytes MB available (now $([int](Get-FreeMegabytes)) MB)"
 
 # A running client is adopted as main; everything else is untracked and closed
 $runningMain = Get-RobloxClients | Sort-Object StartTime | Select-Object -First 1
 if ($runningMain)
 {
     $sessions[$mainAccount].ProcessId = $runningMain.Id
+    $sessions[$mainAccount].ProcessStartTime = $runningMain.StartTime
     $sessions[$mainAccount].StartedAt = $runningMain.StartTime
-    $sessions[$mainAccount].LogPath = Find-StartupLogFile $runningMain
-    Write-Log "adopted PID $($runningMain.Id) as main $mainAccount, log $(Split-Path -Leaf $sessions[$mainAccount].LogPath)"
+    try
+    {
+        $sessions[$mainAccount].LogPath = Find-StartupLogFile $runningMain
+        Write-Log "adopted PID $($runningMain.Id) as main $mainAccount, log $(Split-Path -Leaf $sessions[$mainAccount].LogPath)"
+    }
+    catch
+    {
+        # Without a log we cannot see main disconnect, but it is still tracked and tiled
+        Write-Log "WARNING: adopted PID $($runningMain.Id) as main $mainAccount but found no matching log, disconnect detection stays off for main until it relaunches"
+    }
     Set-ClientWindow $runningMain.Id 0                                                # main is always slot 0
 }
 Write-Log "alts: $($altAccounts -join ', ')"
 
-Get-Process $processName -ErrorAction SilentlyContinue |
-    Where-Object { $_.Id -ne $sessions[$mainAccount].ProcessId -and $_.MainWindowHandle -ne 0 } |
-    ForEach-Object {
-        Stop-Process -Id $_.Id -Force
-        Write-Log "closed leftover PID $($_.Id)"
-    }
+if ($closeOtherClients)
+{
+    Get-Process $processName -ErrorAction SilentlyContinue |
+        Where-Object { $_.Id -ne $sessions[$mainAccount].ProcessId -and $_.MainWindowHandle -ne 0 } |
+        ForEach-Object {
+            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+            Write-Log "closed leftover PID $($_.Id)"
+        }
+}
 
 while ($true)
 {
-    $freeMegabytes = Get-FreeMegabytes
-    if ($freeMegabytes -lt $minimumFreeMegabytes)
+    # Nothing in here is fatal: a bad tick is logged and retried on the next one
+    try
     {
-        $largestAlt = Get-RobloxClients |
-            Where-Object { $_.Id -ne $sessions[$mainAccount].ProcessId } |
-            Sort-Object WorkingSet64 -Descending |
-            Select-Object -First 1
-
-        if (-not $largestAlt)
+        $freeMegabytes = Get-FreeMegabytes
+        if ($freeMegabytes -lt $minimumFreeMegabytes)
         {
-            throw "Free memory is $([int]$freeMegabytes) MB and no alt is left to kill"
-        }
+            $largestAlt = Get-RobloxClients |
+                Where-Object { $_.Id -ne $sessions[$mainAccount].ProcessId } |
+                Sort-Object WorkingSet64 -Descending |
+                Select-Object -First 1
 
-        Stop-Process -Id $largestAlt.Id -Force
-        Write-Log "killed PID $($largestAlt.Id) ($([int]($largestAlt.WorkingSet64 / 1MB)) MB), free was $([int]$freeMegabytes) MB"
+            if ($largestAlt)
+            {
+                Stop-Process -Id $largestAlt.Id -Force -ErrorAction SilentlyContinue
+                Write-Log "killed PID $($largestAlt.Id) ($([int]($largestAlt.WorkingSet64 / 1MB)) MB), free was $([int]$freeMegabytes) MB"
+            }
+            else
+            {
+                Write-Log "WARNING: only $([int]$freeMegabytes) MB free and no alt left to kill"
+            }
+        }
+    }
+    catch
+    {
+        Write-Log "WARNING: memory check failed: $($_.Exception.Message)"
     }
 
     foreach ($accountName in $allAccounts)
     {
         $session = $sessions[$accountName]
-
-        if ($session.ProcessId -eq 0)
+        try
         {
-            if ((Get-Date) -gt $session.RelaunchAfter) { Start-Session $accountName }
-            continue
+            if ($session.ProcessId -eq 0)
+            {
+                if ((Get-Date) -ge $session.RelaunchAfter)
+                {
+                    try
+                    {
+                        Start-Session $accountName
+                        $session.FailureCount = 0
+                    }
+                    catch
+                    {
+                        # Back off a little further each time instead of hammering RAM, but
+                        # never give up: an account that cannot start yet keeps being retried
+                        $session.FailureCount++
+                        $backoffSeconds = [math]::Min($relaunchDelaySeconds * $session.FailureCount, 600)
+                        $session.RelaunchAfter = (Get-Date).AddSeconds($backoffSeconds)
+                        Write-Log "WARNING: launching $accountName failed ($($session.FailureCount)x): $($_.Exception.Message)"
+                        if ($session.FailureCount -eq $maximumLaunchFailures)
+                        {
+                            Write-Log "ERROR: $accountName has failed $maximumLaunchFailures launches in a row, is RAM running with the web server on?"
+                        }
+                        Write-Log "retrying $accountName in $backoffSeconds s"
+                    }
+                }
+            }
+            elseif (-not (Get-SessionProcess $session))
+            {
+                Stop-Session $accountName "is gone"
+            }
+            elseif ($session.LogPath)
+            {
+                $disconnectReason = Get-DisconnectReason $session                     # $null = still connected
+                if ($disconnectReason)
+                {
+                    Stop-Session $accountName "disconnected (reason $disconnectReason)"
+                }
+                elseif ($accountName -ne $mainAccount -and $session.StartedAt -and
+                        ((Get-Date) - $session.StartedAt).TotalMinutes -gt $maximumSessionMinutes)
+                {
+                    Stop-Session $accountName "is older than $maximumSessionMinutes min"
+                }
+            }
         }
-
-        if (-not (Get-Process -Id $session.ProcessId -ErrorAction SilentlyContinue))
+        catch
         {
-            Stop-Session $accountName "is gone"
-            continue
-        }
-
-        $disconnectReason = Get-DisconnectReason $session                             # $null = still connected
-        if ($disconnectReason)
-        {
-            Stop-Session $accountName "disconnected (reason $disconnectReason)"
-        }
-        elseif ($accountName -ne $mainAccount -and ((Get-Date) - $session.StartedAt).TotalMinutes -gt $maximumSessionMinutes)
-        {
-            Stop-Session $accountName "is older than $maximumSessionMinutes min"
+            Write-Log "WARNING: checking $accountName failed: $($_.Exception.Message)"
         }
     }
 
