@@ -11,6 +11,7 @@ if your PC runs low on RAM, it closes the heaviest alt instead of letting everyt
 tiles all the windows so they don't stack, main always in the top left
 keeps retrying with a growing delay when a launch fails, instead of dying
 caps Roblox's frame rate so the clients don't eat your CPU rendering frames nobody looks at
+keeps the clients awake so Roblox doesn't kick them for being idle
 
 you need Roblox Account Manager
 
@@ -37,5 +38,15 @@ Running a bunch of clients is usually CPU bound, not RAM bound. Uncapped, each c
 The cap goes into Roblox's own settings, and Roblox resets it to unlimited whenever a client closes, so the watchdog writes it again at startup and before every launch. Set it to 0 if you'd rather leave Roblox alone.
 
 A client only picks up the cap when it launches, so an already running client (like a main you adopted) keeps whatever it started with until it relaunches.
+
+about anti-idle
+
+Roblox kicks a client after 20 minutes without input, and it only counts input while the window has focus. So there is no way around it: the window has to come to the front for a moment to get the keystroke. The watchdog puts your previous window back straight after, so it isn't supposed to interrupt what you were doing.
+
+Default is every 15 minutes per account, and each account is on its own timer starting from when it joined, so they don't all do it at once. Max is 18, because 20 is when Roblox pulls the plug. Set it to 0 to turn it off.
+
+Default key is Space, which is the most reliable thing to register as input but does make your character jump. Any single letter works too, so pick something your game ignores if jumping is a problem.
+
+Two things to know. With several accounts you'll see a brief focus flicker every few minutes, and if you happen to be typing at that exact moment the keystroke goes to Roblox instead of to you. And if Windows refuses to hand over focus, the keystroke is skipped and it tries again a minute later rather than fighting for it.
 
 Settings get saved, so next time it's just start. They live in %LOCALAPPDATA%\RobloxWatchdog\, the RAM password is encrypted for your Windows account only, and the run log is next to it in RobloxWatchdog.log.

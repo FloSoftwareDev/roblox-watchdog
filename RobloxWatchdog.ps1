@@ -16,6 +16,8 @@
 #                                         bestandsrechten dichtgezet, private server link gevalideerd, PID-hergebruik afgevangen.
 #                                         Robuustheid: fouten in de lus niet meer fataal, backoff na mislukte launches,
 #                                         HTTP-timeout, logbestand, afgeknot logbestand afgevangen.
+# 004          23-09-2026 Miniwar AFK FG  Framerate cap tegen CPU-verbruik, anti-idle: venster naar voren en toetsaanslag
+#                                         zodat Roblox de client niet na 20 minuten kickt.
 #
 #------------------------------------------------------------------------------------#
 
@@ -106,6 +108,8 @@ function Get-DefaultSettings
         MaximumSessionMinutes  = "45"
         CloseOtherClients      = "True"
         FramerateCap           = "30"
+        AntiIdleMinutes        = "15"
+        AntiIdleKey            = "Space"
     }
 }
 
@@ -180,7 +184,7 @@ function Show-SettingsWindow($saved)
 {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Roblox Watchdog"
-    $form.Size = New-Object System.Drawing.Size(460, 560)
+    $form.Size = New-Object System.Drawing.Size(460, 620)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
@@ -226,6 +230,8 @@ function Show-SettingsWindow($saved)
     Add-Row "Seconds between launches" "RelaunchDelaySeconds" 20 $false
     Add-Row "Relog alts after minutes" "MaximumSessionMinutes" 20 $false
     Add-Row "Roblox frame rate cap (0=off)" "FramerateCap" 20 $false
+    Add-Row "Anti-idle every minutes (0=off)" "AntiIdleMinutes" 20 $false
+    Add-Row "Anti-idle key" "AntiIdleKey" 20 $false
 
     # Closing other clients is destructive, so it is a deliberate choice
     $closeOthersBox = New-Object System.Windows.Forms.CheckBox
@@ -298,6 +304,12 @@ function Test-Settings($settings)
     if ($settings.FramerateCap -notmatch '^\d{1,3}$') { throw "Frame rate cap must be a number (0 to leave it alone)" }
     $cap = [int]$settings.FramerateCap
     if ($cap -ne 0 -and ($cap -lt 15 -or $cap -gt 360)) { throw "Frame rate cap must be 0, or between 15 and 360" }
+
+    # Roblox kicks at 20 minutes idle, so the interval has to leave room to get there
+    if ($settings.AntiIdleMinutes -notmatch '^\d{1,2}$') { throw "Anti-idle minutes must be a number (0 to turn it off)" }
+    $idle = [int]$settings.AntiIdleMinutes
+    if ($idle -ne 0 -and ($idle -lt 1 -or $idle -gt 18)) { throw "Anti-idle minutes must be 0, or between 1 and 18 (Roblox kicks at 20)" }
+    if ($settings.AntiIdleKey -notmatch '^(Space|[A-Za-z])$') { throw "Anti-idle key must be Space or a single letter" }
 }
 
 # Reopen the window on a bad value instead of throwing away everything that was typed
@@ -329,6 +341,10 @@ $relaunchDelaySeconds = [int]$settings.RelaunchDelaySeconds
 $maximumSessionMinutes = [int]$settings.MaximumSessionMinutes
 $closeOtherClients = ($settings.CloseOtherClients -ne "False")
 $framerateCap = [int]$settings.FramerateCap
+$antiIdleMinutes = [int]$settings.AntiIdleMinutes
+$antiIdleKey = $settings.AntiIdleKey
+# A-Z virtual key codes are the same numbers as their uppercase characters
+$antiIdleVirtualKey = if ($antiIdleKey -eq "Space") { [byte]0x20 } else { [byte][char]([string]$antiIdleKey).ToUpper() }
 
 # ---- Watchdog ----------------------------------------------------------------------
 
@@ -384,6 +400,11 @@ function Get-SessionProcess($session)
 Add-Type -Namespace Win32 -Name Window -MemberDefinition @"
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int x, int y, int width, int height, bool repaint);
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool altTab);
+[DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+[DllImport("user32.dll")] public static extern uint MapVirtualKey(uint uCode, uint uMapType);
 "@
 
 function Set-ClientWindow($processId, $slotIndex)
@@ -420,6 +441,58 @@ function Set-ClientWindow($processId, $slotIndex)
     [Win32.Window]::ShowWindow($process.MainWindowHandle, 9) | Out-Null   # SW_RESTORE, MoveWindow ignores maximized windows
     [Win32.Window]::MoveWindow($process.MainWindowHandle, $x, $y, $tileWidth, $tileHeight, $true) | Out-Null
     Write-Log "moved PID $processId to slot $slotIndex ($x,$y $($tileWidth)x$($tileHeight))"
+}
+
+function Send-AntiIdleInput($accountName)
+{
+    # Roblox kicks a client after 20 minutes without input, and it only counts input
+    # while its window has focus, so the window has to be brought to the front first.
+    # Whatever the user was working in gets the focus back afterwards.
+    $session = $sessions[$accountName]
+    $process = Get-SessionProcess $session
+    if (-not $process) { return }
+
+    $process.Refresh()
+    $handle = $process.MainWindowHandle
+    if ($handle -eq [IntPtr]::Zero)
+    {
+        Write-Log "WARNING: $accountName has no window, skipping anti-idle"
+        return
+    }
+
+    $previous = [Win32.Window]::GetForegroundWindow()                                 # give this back when done
+
+    [Win32.Window]::ShowWindow($handle, 9) | Out-Null                                 # SW_RESTORE, a minimised window cannot take focus
+    [Win32.Window]::SetForegroundWindow($handle) | Out-Null
+    Start-Sleep -Milliseconds 400
+
+    if ([Win32.Window]::GetForegroundWindow() -ne $handle)
+    {
+        # Windows refuses SetForegroundWindow unless the caller already owns the
+        # foreground; SwitchToThisWindow is not bound by that
+        [Win32.Window]::SwitchToThisWindow($handle, $true)
+        Start-Sleep -Milliseconds 400
+    }
+
+    if ([Win32.Window]::GetForegroundWindow() -ne $handle)
+    {
+        # Retry in a minute rather than fighting for focus on every tick
+        $session.LastInputAt = (Get-Date).AddMinutes(1 - $antiIdleMinutes)
+        Write-Log "WARNING: could not focus $accountName, anti-idle keystroke not sent, retrying in 1 min"
+        return
+    }
+
+    $scanCode = [byte]([Win32.Window]::MapVirtualKey($antiIdleVirtualKey, 0))          # games want a real scan code
+    [Win32.Window]::keybd_event($antiIdleVirtualKey, $scanCode, 0, [UIntPtr]::Zero)    # key down
+    Start-Sleep -Milliseconds 80
+    [Win32.Window]::keybd_event($antiIdleVirtualKey, $scanCode, 2, [UIntPtr]::Zero)    # KEYEVENTF_KEYUP
+    $session.LastInputAt = Get-Date
+    Write-Log "anti-idle: pressed $antiIdleKey in $accountName"
+
+    if ($previous -ne [IntPtr]::Zero -and $previous -ne $handle)
+    {
+        [Win32.Window]::SetForegroundWindow($previous) | Out-Null
+    }
 }
 
 function Get-LaunchUrl($accountName)
@@ -590,6 +663,7 @@ function Start-Session($accountName)
     $session.LogPath = $logPath
     $session.LogOffset = 0
     $session.StartedAt = Get-Date
+    $session.LastInputAt = Get-Date                                                   # joining counts as input
     Write-Log "$accountName running as PID $($session.ProcessId), log $(Split-Path -Leaf $session.LogPath)"
 
     # Staggers the next launch so accounts don't join at the same second
@@ -625,7 +699,8 @@ $sessions = @{}
 foreach ($accountName in $allAccounts)
 {
     $sessions[$accountName] = @{ ProcessId = 0; ProcessStartTime = $null; StartedAt = $null
-                                 RelaunchAfter = (Get-Date); LogPath = $null; LogOffset = 0; FailureCount = 0 }
+                                 RelaunchAfter = (Get-Date); LogPath = $null; LogOffset = 0; FailureCount = 0
+                                 LastInputAt = $null }
 }
 
 Write-Log "watchdog started, settings in $settingsPath, log in $logFilePath"
@@ -639,6 +714,7 @@ if ($runningMain)
     $sessions[$mainAccount].ProcessId = $runningMain.Id
     $sessions[$mainAccount].ProcessStartTime = $runningMain.StartTime
     $sessions[$mainAccount].StartedAt = $runningMain.StartTime
+    $sessions[$mainAccount].LastInputAt = Get-Date                                    # unknown when it last had input, so start the clock now
     try
     {
         $sessions[$mainAccount].LogPath = Find-StartupLogFile $runningMain
@@ -738,6 +814,14 @@ while ($true)
                 {
                     Stop-Session $accountName "is older than $maximumSessionMinutes min"
                 }
+            }
+
+            # Still tracked after the checks above, so it is due a keystroke if it has
+            # gone quiet; skipped for a session that was just stopped (ProcessId is 0)
+            if ($antiIdleMinutes -gt 0 -and $session.ProcessId -ne 0 -and $session.LastInputAt -and
+                ((Get-Date) - $session.LastInputAt).TotalMinutes -ge $antiIdleMinutes)
+            {
+                Send-AntiIdleInput $accountName
             }
         }
         catch
