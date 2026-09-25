@@ -199,7 +199,7 @@ function Show-SettingsWindow($saved)
 {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Roblox Watchdog"
-    $form.Size = New-Object System.Drawing.Size(460, 660)
+    $form.Size = New-Object System.Drawing.Size(600, 680)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
@@ -212,12 +212,16 @@ function Show-SettingsWindow($saved)
         $label = New-Object System.Windows.Forms.Label
         $label.Text = $labelText
         $label.Location = New-Object System.Drawing.Point(15, $rowTop)
-        $label.Size = New-Object System.Drawing.Size(170, 20)
+        # Generous width: the longest label needs ~160px at 100% scaling, and a label
+        # that runs out of room wraps and gets clipped by its own height
+        $label.Size = New-Object System.Drawing.Size(225, 20)
+        # centred against the field, and top-aligned next to a multiline box
+        $label.TextAlign = if ($height -gt 20) { "TopLeft" } else { "MiddleLeft" }
         $form.Controls.Add($label)
 
         $textBox = New-Object System.Windows.Forms.TextBox
-        $textBox.Location = New-Object System.Drawing.Point(190, $rowTop)
-        $textBox.Size = New-Object System.Drawing.Size(240, $height)
+        $textBox.Location = New-Object System.Drawing.Point(248, $rowTop)
+        $textBox.Size = New-Object System.Drawing.Size(320, $height)
         $textBox.Text = $saved[$key]
         if ($height -gt 20)
         {
@@ -244,16 +248,16 @@ function Show-SettingsWindow($saved)
     Add-Row "Kill an alt below free MB" "MinimumFreeMegabytes" 20 $false
     Add-Row "Seconds between launches" "RelaunchDelaySeconds" 20 $false
     Add-Row "Relog alts after minutes" "MaximumSessionMinutes" 20 $false
-    Add-Row "Roblox frame rate cap (0=off)" "FramerateCap" 20 $false
-    Add-Row "Anti-idle every minutes (0=off)" "AntiIdleMinutes" 20 $false
+    Add-Row "Frame rate cap (0=off)" "FramerateCap" 20 $false
+    Add-Row "Anti-idle every min (0=off)" "AntiIdleMinutes" 20 $false
     Add-Row "Anti-idle key" "AntiIdleKey" 20 $false
-    Add-Row "Close strays after minutes (0=off)" "ReapStrayMinutes" 20 $false
+    Add-Row "Close strays after min (0=off)" "ReapStrayMinutes" 20 $false
 
     # Closing other clients is destructive, so it is a deliberate choice
     $closeOthersBox = New-Object System.Windows.Forms.CheckBox
     $closeOthersBox.Text = "Close other Roblox windows on start"
-    $closeOthersBox.Location = New-Object System.Drawing.Point(190, $rowTop)
-    $closeOthersBox.Size = New-Object System.Drawing.Size(240, 20)
+    $closeOthersBox.Location = New-Object System.Drawing.Point(248, $rowTop)
+    $closeOthersBox.Size = New-Object System.Drawing.Size(320, 20)
     $closeOthersBox.Checked = ($saved["CloseOtherClients"] -ne "False")
     $form.Controls.Add($closeOthersBox)
     $rowTop += 30
@@ -261,12 +265,12 @@ function Show-SettingsWindow($saved)
     $note = New-Object System.Windows.Forms.Label
     $note.Text = "A running client is adopted as main; otherwise main is launched."
     $note.Location = New-Object System.Drawing.Point(15, $rowTop)
-    $note.Size = New-Object System.Drawing.Size(415, 20)
+    $note.Size = New-Object System.Drawing.Size(553, 20)
     $form.Controls.Add($note)
 
     $startButton = New-Object System.Windows.Forms.Button
     $startButton.Text = "Start"
-    $startButton.Location = New-Object System.Drawing.Point(330, ($rowTop + 30))
+    $startButton.Location = New-Object System.Drawing.Point(468, ($rowTop + 30))
     $startButton.Size = New-Object System.Drawing.Size(100, 30)
     $startButton.DialogResult = "OK"
     $form.Controls.Add($startButton)
