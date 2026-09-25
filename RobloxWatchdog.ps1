@@ -18,6 +18,9 @@
 #                                         HTTP-timeout, logbestand, afgeknot logbestand afgevangen.
 # 004          23-09-2026 Miniwar AFK FG  Framerate cap tegen CPU-verbruik, anti-idle: venster naar voren en toetsaanslag
 #                                         zodat Roblox de client niet na 20 minuten kickt.
+# 005          25-09-2026 Miniwar AFK FG  Client die wel start maar nooit in de game komt wordt herstart (geen disconnectcode
+#                                         bij "failed to connect"), zwerfprocessen zonder venster worden opgeruimd,
+#                                         fatale fouten gaan naar het logbestand in plaats van alleen het console.
 #
 #------------------------------------------------------------------------------------#
 
@@ -32,6 +35,8 @@ $maximumLaunchFailures = 5                                                      
 $logFolder = Join-Path $env:LOCALAPPDATA "Roblox\logs"                              # Roblox client log files
 $disconnectPattern = "Sending disconnect with reason: (\d+)"                         # logged on drop (277) and leave (285)
 $ignoredDisconnectReasons = @()                                                      # e.g. @("285") to ignore a normal leave/teleport
+$joinMarker = "Connection accepted"                                                  # logged only once the client is really in the game
+$joinTimeoutSeconds = 150                                                            # no join by then means it is stuck on an error screen
 $httpClient = New-Object System.Net.Http.HttpClient
 $httpClient.Timeout = [TimeSpan]::FromSeconds(15)                                    # never let a hung RAM freeze the watchdog
 
@@ -42,13 +47,6 @@ $settingsFolder = Join-Path $env:LOCALAPPDATA "RobloxWatchdog"
 $settingsPath = Join-Path $settingsFolder "RobloxWatchdog.json"
 $legacySettingsPath = Join-Path $scriptFolder "RobloxWatchdog.json"                  # pre-003 location, migrated on first run
 $logFilePath = Join-Path $settingsFolder "RobloxWatchdog.log"
-
-trap
-{
-    Write-Host "ERROR: $_" -ForegroundColor Red
-    Read-Host "Press Enter to close"
-    exit 1
-}
 
 function Write-Log($message)
 {
@@ -66,6 +64,22 @@ function Write-Log($message)
     {
         # console output is enough; logging must never take the watchdog down
     }
+}
+
+# Defined after Write-Log so a fatal error is written to the log file and not only to
+# a console nobody is watching. It also no longer waits forever on Read-Host: the old
+# version left the watchdog dead and silent until someone noticed the stuck window.
+trap
+{
+    Write-Log "FATAL: $_"
+    if ($_.InvocationInfo)
+    {
+        Write-Log "FATAL at line $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line.Trim())"
+    }
+    Write-Host "ERROR: $_" -ForegroundColor Red
+    Write-Host "Closing in 15 seconds, the reason is in $logFilePath" -ForegroundColor Yellow
+    Start-Sleep -Seconds 15
+    exit 1
 }
 
 # ---- Settings window ---------------------------------------------------------------
@@ -110,6 +124,7 @@ function Get-DefaultSettings
         FramerateCap           = "30"
         AntiIdleMinutes        = "15"
         AntiIdleKey            = "Space"
+        ReapStrayMinutes       = "3"
     }
 }
 
@@ -184,7 +199,7 @@ function Show-SettingsWindow($saved)
 {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Roblox Watchdog"
-    $form.Size = New-Object System.Drawing.Size(460, 620)
+    $form.Size = New-Object System.Drawing.Size(460, 660)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
@@ -232,6 +247,7 @@ function Show-SettingsWindow($saved)
     Add-Row "Roblox frame rate cap (0=off)" "FramerateCap" 20 $false
     Add-Row "Anti-idle every minutes (0=off)" "AntiIdleMinutes" 20 $false
     Add-Row "Anti-idle key" "AntiIdleKey" 20 $false
+    Add-Row "Close strays after minutes (0=off)" "ReapStrayMinutes" 20 $false
 
     # Closing other clients is destructive, so it is a deliberate choice
     $closeOthersBox = New-Object System.Windows.Forms.CheckBox
@@ -310,6 +326,12 @@ function Test-Settings($settings)
     $idle = [int]$settings.AntiIdleMinutes
     if ($idle -ne 0 -and ($idle -lt 1 -or $idle -gt 18)) { throw "Anti-idle minutes must be 0, or between 1 and 18 (Roblox kicks at 20)" }
     if ($settings.AntiIdleKey -notmatch '^(Space|[A-Za-z])$') { throw "Anti-idle key must be Space or a single letter" }
+
+    # Grace period before an untracked windowless client counts as a stray. Must be
+    # longer than a launch takes, or a client still starting up would be killed
+    if ($settings.ReapStrayMinutes -notmatch '^\d{1,3}$') { throw "Close strays after minutes must be a number (0 to turn it off)" }
+    $reap = [int]$settings.ReapStrayMinutes
+    if ($reap -ne 0 -and ($reap -lt 2 -or $reap -gt 120)) { throw "Close strays after minutes must be 0, or between 2 and 120" }
 }
 
 # Reopen the window on a bad value instead of throwing away everything that was typed
@@ -345,6 +367,8 @@ $antiIdleMinutes = [int]$settings.AntiIdleMinutes
 $antiIdleKey = $settings.AntiIdleKey
 # A-Z virtual key codes are the same numbers as their uppercase characters
 $antiIdleVirtualKey = if ($antiIdleKey -eq "Space") { [byte]0x20 } else { [byte][char]([string]$antiIdleKey).ToUpper() }
+$reapStrayMinutes = [int]$settings.ReapStrayMinutes
+$reportedStrays = @{}                                                                # windowed strays already mentioned, so the log is not spammed
 
 # ---- Watchdog ----------------------------------------------------------------------
 
@@ -441,6 +465,47 @@ function Set-ClientWindow($processId, $slotIndex)
     [Win32.Window]::ShowWindow($process.MainWindowHandle, 9) | Out-Null   # SW_RESTORE, MoveWindow ignores maximized windows
     [Win32.Window]::MoveWindow($process.MainWindowHandle, $x, $y, $tileWidth, $tileHeight, $true) | Out-Null
     Write-Log "moved PID $processId to slot $slotIndex ($x,$y $($tileWidth)x$($tileHeight))"
+}
+
+function Remove-StrayClients
+{
+    # Roblox relaunches its own clients into "systray mode" every few hours. The
+    # original exits and gets picked up as "is gone", but the process it spawned stays
+    # alive with no window and never joins a game, so they pile up until someone
+    # clears them out of Task Manager. Anything we did not launch, has no window, and
+    # has outlived the grace period is one of those.
+    if ($reapStrayMinutes -le 0) { return }
+
+    $trackedIds = @($sessions.Values | ForEach-Object { $_.ProcessId } | Where-Object { $_ -ne 0 })
+    $cutoff = (Get-Date).AddMinutes(-$reapStrayMinutes)
+
+    foreach ($process in (Get-Process $processName -ErrorAction SilentlyContinue))
+    {
+        if ($trackedIds -contains $process.Id) { continue }
+        try
+        {
+            if ($process.StartTime -gt $cutoff) { continue }                          # still within its grace period
+            $process.Refresh()
+
+            if ($process.MainWindowHandle -eq [IntPtr]::Zero)
+            {
+                $ageMinutes = ((Get-Date) - $process.StartTime).TotalMinutes
+                Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                Write-Log "closed stray PID $($process.Id) (no window, $([int]$ageMinutes) min old, $([int]($process.WorkingSet64 / 1MB)) MB)"
+            }
+            elseif (-not $reportedStrays.ContainsKey($process.Id))
+            {
+                # It has a window, so it could be a client started by hand. Left alone
+                # on purpose, but said once so it is not a surprise.
+                $reportedStrays[$process.Id] = $true
+                Write-Log "note: PID $($process.Id) is an untracked client with a window, leaving it alone"
+            }
+        }
+        catch
+        {
+            Write-Log "WARNING: could not deal with stray PID $($process.Id): $($_.Exception.Message)"
+        }
+    }
 }
 
 function Send-AntiIdleInput($accountName)
@@ -628,10 +693,19 @@ function Read-NewLogText($session)
     }
 }
 
-function Get-DisconnectReason($session)
+function Update-SessionFromLog($session)
 {
-    # Returns the Roblox disconnect code (e.g. 277, 285), or $null while still connected
-    $match = [regex]::Match((Read-NewLogText $session), $disconnectPattern)          # first disconnect line
+    # One read per tick, because the offset only moves forward and both checks share it.
+    # Returns the Roblox disconnect code (e.g. 277, 285), or $null while still connected,
+    # and records the moment the client actually got into the game.
+    $text = Read-NewLogText $session
+
+    if (-not $session.JoinedAt -and $text.Contains($joinMarker))
+    {
+        $session.JoinedAt = Get-Date
+    }
+
+    $match = [regex]::Match($text, $disconnectPattern)                               # first disconnect line
     if ($match.Success -and $ignoredDisconnectReasons -notcontains $match.Groups[1].Value)
     {
         return $match.Groups[1].Value
@@ -663,6 +737,7 @@ function Start-Session($accountName)
     $session.LogPath = $logPath
     $session.LogOffset = 0
     $session.StartedAt = Get-Date
+    $session.JoinedAt = $null                                                         # not in the game until the log says so
     $session.LastInputAt = Get-Date                                                   # joining counts as input
     Write-Log "$accountName running as PID $($session.ProcessId), log $(Split-Path -Leaf $session.LogPath)"
 
@@ -700,7 +775,7 @@ foreach ($accountName in $allAccounts)
 {
     $sessions[$accountName] = @{ ProcessId = 0; ProcessStartTime = $null; StartedAt = $null
                                  RelaunchAfter = (Get-Date); LogPath = $null; LogOffset = 0; FailureCount = 0
-                                 LastInputAt = $null }
+                                 LastInputAt = $null; JoinedAt = $null }
 }
 
 Write-Log "watchdog started, settings in $settingsPath, log in $logFilePath"
@@ -715,6 +790,7 @@ if ($runningMain)
     $sessions[$mainAccount].ProcessStartTime = $runningMain.StartTime
     $sessions[$mainAccount].StartedAt = $runningMain.StartTime
     $sessions[$mainAccount].LastInputAt = Get-Date                                    # unknown when it last had input, so start the clock now
+    $sessions[$mainAccount].JoinedAt = Get-Date                                       # it was already playing, so don't hold it to the join timeout
     try
     {
         $sessions[$mainAccount].LogPath = Find-StartupLogFile $runningMain
@@ -768,6 +844,15 @@ while ($true)
         Write-Log "WARNING: memory check failed: $($_.Exception.Message)"
     }
 
+    try
+    {
+        Remove-StrayClients
+    }
+    catch
+    {
+        Write-Log "WARNING: stray cleanup failed: $($_.Exception.Message)"
+    }
+
     foreach ($accountName in $allAccounts)
     {
         $session = $sessions[$accountName]
@@ -804,10 +889,18 @@ while ($true)
             }
             elseif ($session.LogPath)
             {
-                $disconnectReason = Get-DisconnectReason $session                     # $null = still connected
+                $disconnectReason = Update-SessionFromLog $session                    # $null = still connected
                 if ($disconnectReason)
                 {
                     Stop-Session $accountName "disconnected (reason $disconnectReason)"
+                }
+                elseif (-not $session.JoinedAt -and $session.StartedAt -and
+                        ((Get-Date) - $session.StartedAt).TotalSeconds -gt $joinTimeoutSeconds)
+                {
+                    # It launched and has a window, but never got into the game: it is
+                    # sitting on a "failed to connect" screen, which no disconnect code
+                    # is ever written for, so nothing else would notice it
+                    Stop-Session $accountName "never joined the game within $joinTimeoutSeconds s (stuck on an error screen)"
                 }
                 elseif ($accountName -ne $mainAccount -and $session.StartedAt -and
                         ((Get-Date) - $session.StartedAt).TotalMinutes -gt $maximumSessionMinutes)
