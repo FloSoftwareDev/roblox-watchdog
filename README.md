@@ -26,7 +26,7 @@ RAM was archived in October 2024, so it isn't maintained any more, but 3.7.2 sti
 setup
 
 In RAM go to Settings > Developer: turn on Enable Web Server, Allow LaunchAccount Method, and set a Webserver Password (6+ characters)
-Don't run RAM as admin, or autoclickers won't work on the Roblox windows
+Don't run RAM as admin, or autoclickers won't work on the Roblox windows. If you do run it as admin then the clients are admin too, and Windows won't let a normal program touch them: tiling, anti-idle and closing strays all get denied. In that case run the watchdog as admin as well. It says which it is in the log on startup.
 Start your main account first
 Run the script and fill in: alt usernames (one per line), place ID, private server link (paste the full share link), RAM port + password, and the limits (free MB, seconds between launches, relog minutes, frame rate cap)
 Hit start and go touch grass 

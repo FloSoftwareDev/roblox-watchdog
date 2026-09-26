@@ -40,6 +40,11 @@ $joinTimeoutSeconds = 150                                                       
 $httpClient = New-Object System.Net.Http.HttpClient
 $httpClient.Timeout = [TimeSpan]::FromSeconds(15)                                    # never let a hung RAM freeze the watchdog
 
+# Windows refuses to let a normal process close or focus an elevated one, so if RAM is
+# running as administrator its clients are too and half of this script is denied
+$isElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$elevationHintShown = $false
+
 # Settings live in LOCALAPPDATA, not next to the script: when run as a .ps1 the old
 # path resolved to the PowerShell install folder under System32
 $scriptFolder = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent ([Environment]::GetCommandLineArgs()[0]) }
@@ -64,6 +69,16 @@ function Write-Log($message)
     {
         # console output is enough; logging must never take the watchdog down
     }
+}
+
+function Write-ElevationHint
+{
+    # Said once, not on every denial: the old version repeated the same failure every
+    # ten seconds and buried everything else in the log
+    if ($script:elevationHintShown -or $isElevated) { return }
+    $script:elevationHintShown = $true
+    Write-Log "HINT: that was denied because the watchdog is not running as administrator while the Roblox clients are."
+    Write-Log "HINT: either run the exe as administrator, or stop running Roblox Account Manager as administrator (which also fixes autoclickers)."
 }
 
 # Defined after Write-Log so a fatal error is written to the log file and not only to
@@ -435,6 +450,19 @@ Add-Type -Namespace Win32 -Name Window -MemberDefinition @"
 [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint uCode, uint uMapType);
 "@
 
+# Separate block because it needs a struct, which -MemberDefinition cannot declare.
+# Used to read a window back after moving it: MoveWindow can report success while the
+# window has not actually budged.
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public struct RECT { public int Left, Top, Right, Bottom; }
+public class WinPos
+{
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+}
+"@
+
 function Set-ClientWindow($processId, $slotIndex)
 {
     # Roblox creates its window a few seconds after the process starts
@@ -467,8 +495,26 @@ function Set-ClientWindow($processId, $slotIndex)
     $y = $screen.Y + [math]::Floor($slotIndex / $columns) * $tileHeight
 
     [Win32.Window]::ShowWindow($process.MainWindowHandle, 9) | Out-Null   # SW_RESTORE, MoveWindow ignores maximized windows
-    [Win32.Window]::MoveWindow($process.MainWindowHandle, $x, $y, $tileWidth, $tileHeight, $true) | Out-Null
-    Write-Log "moved PID $processId to slot $slotIndex ($x,$y $($tileWidth)x$($tileHeight))"
+    $moved = [Win32.Window]::MoveWindow($process.MainWindowHandle, $x, $y, $tileWidth, $tileHeight, $true)
+
+    # Read the window back instead of trusting the call. A normal process is not allowed
+    # to move an elevated client's window, and this used to be logged as a success
+    # anyway, so the log claimed the windows were tiled when nothing had moved.
+    Start-Sleep -Milliseconds 250
+    $rect = New-Object RECT
+    $readBack = [WinPos]::GetWindowRect($process.MainWindowHandle, [ref]$rect)
+    # Roblox nudges its own window by a few pixels after the move, so allow some slack
+    $offBy = if ($readBack) { [math]::Max([math]::Abs($rect.Left - $x), [math]::Abs($rect.Top - $y)) } else { 99999 }
+
+    if ($moved -and $readBack -and $offBy -le 40)
+    {
+        Write-Log "moved PID $processId to slot $slotIndex ($x,$y $($tileWidth)x$($tileHeight))"
+    }
+    else
+    {
+        Write-Log "WARNING: PID $processId did not move to slot $slotIndex (asked for $x,$y, it sits at $($rect.Left),$($rect.Top))"
+        Write-ElevationHint
+    }
 }
 
 function Remove-StrayClients
@@ -482,8 +528,17 @@ function Remove-StrayClients
 
     $trackedIds = @($sessions.Values | ForEach-Object { $_.ProcessId } | Where-Object { $_ -ne 0 })
     $cutoff = (Get-Date).AddMinutes(-$reapStrayMinutes)
+    $clients = @(Get-Process $processName -ErrorAction SilentlyContinue)
 
-    foreach ($process in (Get-Process $processName -ErrorAction SilentlyContinue))
+    # Forget PIDs that are gone, so the table cannot grow forever and a reused PID is
+    # reported again rather than staying silently suppressed
+    $livePids = @($clients | ForEach-Object { $_.Id })
+    foreach ($key in @($reportedStrays.Keys))
+    {
+        if ($livePids -notcontains $key) { $reportedStrays.Remove($key) }
+    }
+
+    foreach ($process in $clients)
     {
         if ($trackedIds -contains $process.Id) { continue }
         try
@@ -507,7 +562,13 @@ function Remove-StrayClients
         }
         catch
         {
-            Write-Log "WARNING: could not deal with stray PID $($process.Id): $($_.Exception.Message)"
+            # Once per process, not once per tick: this used to repeat every ten seconds
+            if (-not $reportedStrays.ContainsKey($process.Id))
+            {
+                $reportedStrays[$process.Id] = $true
+                Write-Log "WARNING: could not close stray PID $($process.Id): $($_.Exception.Message)"
+                Write-ElevationHint
+            }
         }
     }
 }
@@ -548,6 +609,7 @@ function Send-AntiIdleInput($accountName)
         # Retry in a minute rather than fighting for focus on every tick
         $session.LastInputAt = (Get-Date).AddMinutes(1 - $antiIdleMinutes)
         Write-Log "WARNING: could not focus $accountName, anti-idle keystroke not sent, retrying in 1 min"
+        Write-ElevationHint
         return
     }
 
@@ -783,6 +845,16 @@ foreach ($accountName in $allAccounts)
 }
 
 Write-Log "watchdog started, settings in $settingsPath, log in $logFilePath"
+if ($isElevated)
+{
+    Write-Log "running as administrator"
+}
+else
+{
+    Write-Log "WARNING: not running as administrator. If Roblox Account Manager is elevated then its clients are too,"
+    Write-Log "WARNING: and closing strays plus anti-idle focus will be denied. Run the exe as administrator, or stop"
+    Write-Log "WARNING: running RAM as administrator."
+}
 Set-RobloxFramerateCap
 Write-Log "will kill the largest alt below $minimumFreeMegabytes MB available (now $([int](Get-FreeMegabytes)) MB)"
 
