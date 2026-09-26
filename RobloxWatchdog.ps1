@@ -24,6 +24,7 @@
 # 006          26-09-2026 Miniwar AFK FG  Statusvenster in plaats van een console: de lus is nu een state machine die per
 #                                         tick een stap zet, zodat het venster niet vastloopt tijdens een launch. Tray-icoon,
 #                                         pauzeknop, per-account herstarten en een zichtbare melding als rechten ontbreken.
+#                                         Tegelen verdeelt de accounts nu over alle monitoren naar oppervlak.
 #
 #------------------------------------------------------------------------------------#
 
@@ -160,6 +161,7 @@ function Get-DefaultSettings
         AntiIdleMinutes        = "15"
         AntiIdleKey            = "Space"
         ReapStrayMinutes       = "3"
+        UseAllMonitors         = "True"
     }
 }
 
@@ -298,6 +300,14 @@ function Show-SettingsWindow($saved)
     $closeOthersBox.Size = New-Object System.Drawing.Size(320, 20)
     $closeOthersBox.Checked = ($saved["CloseOtherClients"] -ne "False")
     $form.Controls.Add($closeOthersBox)
+    $rowTop += 26
+
+    $allMonitorsBox = New-Object System.Windows.Forms.CheckBox
+    $allMonitorsBox.Text = "Spread the windows over all monitors"
+    $allMonitorsBox.Location = New-Object System.Drawing.Point(248, $rowTop)
+    $allMonitorsBox.Size = New-Object System.Drawing.Size(320, 20)
+    $allMonitorsBox.Checked = ($saved["UseAllMonitors"] -ne "False")
+    $form.Controls.Add($allMonitorsBox)
     $rowTop += 30
 
     $note = New-Object System.Windows.Forms.Label
@@ -328,6 +338,7 @@ function Show-SettingsWindow($saved)
         $result[$key] = $inputs[$key].Text.Trim()
     }
     $result["CloseOtherClients"] = [string]$closeOthersBox.Checked
+    $result["UseAllMonitors"] = [string]$allMonitorsBox.Checked
     return $result
 }
 
@@ -414,6 +425,7 @@ $antiIdleKey = $settings.AntiIdleKey
 # A-Z virtual key codes are the same numbers as their uppercase characters
 $antiIdleVirtualKey = if ($antiIdleKey -eq "Space") { [byte]0x20 } else { [byte][char]([string]$antiIdleKey).ToUpper() }
 $reapStrayMinutes = [int]$settings.ReapStrayMinutes
+$useAllMonitors = ($settings.UseAllMonitors -ne "False")
 $reportedStrays = @{}                                                                # windowed strays already mentioned, so the log is not spammed
 
 # ---- Watchdog ----------------------------------------------------------------------
@@ -490,6 +502,73 @@ public class WinPos
 }
 "@
 
+function Get-TilingScreens
+{
+    # Primary first so main keeps slot 0 on the screen you actually look at, then the
+    # rest left to right
+    if (-not $useAllMonitors)
+    {
+        return @([System.Windows.Forms.Screen]::PrimaryScreen)
+    }
+    return @([System.Windows.Forms.Screen]::AllScreens |
+             Sort-Object @{ Expression = { -not $_.Primary } }, @{ Expression = { $_.Bounds.X } })
+}
+
+function Get-SlotRectangle($slotIndex)
+{
+    # Accounts are shared out between the screens in proportion to their area, then
+    # tiled inside each one. Tiling across the whole desktop as a single grid would be
+    # simpler but would leave windows straddling the gap between two monitors.
+    $screens = Get-TilingScreens
+    $accountCount = [math]::Max($allAccounts.Count, 1)
+
+    $areas = @($screens | ForEach-Object { [double]($_.WorkingArea.Width * $_.WorkingArea.Height) })
+    $totalArea = ($areas | Measure-Object -Sum).Sum
+
+    # Largest-remainder share-out, so the counts always add up to the account count
+    $exactShares = @(0..($screens.Count - 1) | ForEach-Object { $accountCount * $areas[$_] / $totalArea })
+    $counts = @($exactShares | ForEach-Object { [int][math]::Floor($_) })
+    $remaining = $accountCount - (($counts | Measure-Object -Sum).Sum)
+    if ($remaining -gt 0)
+    {
+        $byRemainder = @(0..($screens.Count - 1) |
+            Sort-Object @{ Expression = { $exactShares[$_] - [math]::Floor($exactShares[$_]) }; Descending = $true })
+        for ($step = 0; $step -lt $remaining; $step++)
+        {
+            $counts[$byRemainder[$step % $screens.Count]]++
+        }
+    }
+
+    $cursor = 0
+    for ($index = 0; $index -lt $screens.Count; $index++)
+    {
+        $onThisScreen = $counts[$index]
+        if ($onThisScreen -gt 0 -and $slotIndex -lt ($cursor + $onThisScreen))
+        {
+            $localIndex = $slotIndex - $cursor
+            $columns = [math]::Ceiling([math]::Sqrt($onThisScreen))
+            $rows = [math]::Ceiling($onThisScreen / $columns)
+            $area = $screens[$index].WorkingArea
+            $tileWidth = [int]($area.Width / $columns)
+            $tileHeight = [int]($area.Height / $rows)
+            return [pscustomobject]@{
+                X = $area.X + ($localIndex % $columns) * $tileWidth
+                Y = $area.Y + [math]::Floor($localIndex / $columns) * $tileHeight
+                Width = $tileWidth
+                Height = $tileHeight
+                ScreenNumber = $index + 1
+                ScreenCount = $screens.Count
+            }
+        }
+        $cursor += $onThisScreen
+    }
+
+    # More accounts than the share-out covered: fall back to the primary, full size
+    $area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    return [pscustomobject]@{ X = $area.X; Y = $area.Y; Width = $area.Width; Height = $area.Height
+                              ScreenNumber = 1; ScreenCount = $screens.Count }
+}
+
 function Set-ClientWindow($processId, $slotIndex)
 {
     # Nothing here waits: the Tiling state does the waiting, one step per tick, so the
@@ -499,13 +578,11 @@ function Set-ClientWindow($processId, $slotIndex)
     $process.Refresh()
     if ($process.MainWindowHandle -eq [IntPtr]::Zero) { return $false }
 
-    $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-    $columns = [math]::Ceiling([math]::Sqrt($allAccounts.Count))
-    $rows = [math]::Ceiling($allAccounts.Count / $columns)
-    $tileWidth = [int]($screen.Width / $columns)
-    $tileHeight = [int]($screen.Height / $rows)
-    $x = $screen.X + ($slotIndex % $columns) * $tileWidth
-    $y = $screen.Y + [math]::Floor($slotIndex / $columns) * $tileHeight
+    $slot = Get-SlotRectangle $slotIndex
+    $x = $slot.X
+    $y = $slot.Y
+    $tileWidth = $slot.Width
+    $tileHeight = $slot.Height
 
     [Win32.Window]::ShowWindow($process.MainWindowHandle, 9) | Out-Null   # SW_RESTORE, MoveWindow ignores maximized windows
     $moved = [Win32.Window]::MoveWindow($process.MainWindowHandle, $x, $y, $tileWidth, $tileHeight, $true)
@@ -521,7 +598,8 @@ function Set-ClientWindow($processId, $slotIndex)
 
     if ($moved -and $readBack -and $offBy -le 40)
     {
-        Write-Log "moved PID $processId to slot $slotIndex ($x,$y $($tileWidth)x$($tileHeight))"
+        $where = if ($slot.ScreenCount -gt 1) { " on screen $($slot.ScreenNumber)" } else { "" }
+        Write-Log "moved PID $processId to slot $slotIndex$where ($x,$y $($tileWidth)x$($tileHeight))"
         return $true
     }
 
@@ -1300,6 +1378,7 @@ $settingsButton.Add_Click({
     $script:antiIdleVirtualKey = if ($updated.AntiIdleKey -eq "Space") { [byte]0x20 } else { [byte][char]([string]$updated.AntiIdleKey).ToUpper() }
     $script:reapStrayMinutes = [int]$updated.ReapStrayMinutes
     $script:closeOtherClients = ($updated.CloseOtherClients -ne "False")
+    $script:useAllMonitors = ($updated.UseAllMonitors -ne "False")
     Write-Log "settings saved and applied"
 
     if ($updated.MainAccount -ne $mainAccount -or $updated.AltAccounts -ne $settings.AltAccounts)

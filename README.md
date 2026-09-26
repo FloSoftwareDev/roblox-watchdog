@@ -8,7 +8,7 @@ launches your alts into the private server through Roblox Account Manager (RAM, 
 relaunches any account that crashes or gets kicked, main included
 relogs alts every X minutes so they don't go stale (main is never relogged)
 if your PC runs low on RAM, it closes the heaviest alt instead of letting everything freeze
-tiles all the windows so they don't stack, main always in the top left
+tiles all the windows so they don't stack, spread over all your monitors, main always top left on the main screen
 keeps retrying with a growing delay when a launch fails, instead of dying
 caps Roblox's frame rate so the clients don't eat your CPU rendering frames nobody looks at
 keeps the clients awake so Roblox doesn't kick them for being idle
@@ -50,6 +50,14 @@ Default is every 15 minutes per account, and each account is on its own timer st
 Default key is Space, which is the most reliable thing to register as input but does make your character jump. Any single letter works too, so pick something your game ignores if jumping is a problem.
 
 Two things to know. With several accounts you'll see a brief focus flicker every few minutes, and if you happen to be typing at that exact moment the keystroke goes to Roblox instead of to you. And if Windows refuses to hand over focus, the keystroke is skipped and it tries again a minute later rather than fighting for it.
+
+about the window layout
+
+Accounts are shared out over your monitors in proportion to how much screen area each one has, and then tiled inside each screen. Nothing is tiled across the gap between two monitors, so no window ever ends up half on one screen and half on the other. Main keeps the top left slot on your main screen.
+
+On a 2560x1440 plus a 1920x1080, six accounts go from 853x700 each to four at 1280x720 and two at 960x1080, which is roughly 60% more room per window.
+
+Untick "Spread the windows over all monitors" to keep everything on the main screen, which is handy if you are recording or want the second screen for something else.
 
 about stuck clients and strays
 
