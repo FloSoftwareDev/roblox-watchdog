@@ -11,20 +11,20 @@
 #------------------------------------------------------------------------------------#
 # Aanpassing   Datum   Project Pgmr   Omschrijving
 # 001          19-09-2026 Miniwar AFK FG  Password verplicht, fallback zonder LinkCode verwijderd, RAM-antwoord loggen, nieuw venster is de succescontrole, volledige private server link via JobId
-# 002          21-09-2026 Miniwar AFK FG  Disconnect-detectie via Roblox logbestanden, main wordt ook herstart en getegeld (slot 0)
+# 002          21-09-2026 Miniwar AFK FG  Disconnect-detectie via Roblox-logbestanden, main wordt ook herstart en getegeld (slot 0)
 # 003          22-09-2026 Miniwar AFK FG  Security: instellingen naar LOCALAPPDATA, wachtwoord versleuteld (DPAPI),
-#                                         bestandsrechten dichtgezet, private server link gevalideerd, PID-hergebruik afgevangen.
+#                                         bestandsrechten dichtgezet, private-serverlink gevalideerd, PID-hergebruik afgevangen.
 #                                         Robuustheid: fouten in de lus niet meer fataal, backoff na mislukte launches,
-#                                         HTTP-timeout, logbestand, afgeknot logbestand afgevangen.
-# 004          23-09-2026 Miniwar AFK FG  Framerate cap tegen CPU-verbruik, anti-idle: venster naar voren en toetsaanslag
-#                                         zodat Roblox de client niet na 20 minuten kickt.
-# 005          25-09-2026 Miniwar AFK FG  Client die wel start maar nooit in de game komt wordt herstart (geen disconnectcode
-#                                         bij "failed to connect"), zwerfprocessen zonder venster worden opgeruimd,
-#                                         fatale fouten gaan naar het logbestand in plaats van alleen het console.
+#                                         HTTP-timeout, logbestand, afgekapt logbestand afgevangen.
+# 004          23-09-2026 Miniwar AFK FG  Framerate-cap tegen CPU-verbruik, anti-idle: venster naar voren en toetsaanslag
+#                                         zodat Roblox de client na 20 minuten niet kickt.
+# 005          25-09-2026 Miniwar AFK FG  Een client die wel start maar nooit in de game komt wordt herstart (er is geen
+#                                         disconnectcode bij "failed to connect"), zwerfprocessen zonder venster worden
+#                                         opgeruimd, fatale fouten gaan naar het logbestand in plaats van alleen de console.
 # 006          26-09-2026 Miniwar AFK FG  Statusvenster in plaats van een console: de lus is nu een state machine die per
 #                                         tick een stap zet, zodat het venster niet vastloopt tijdens een launch. Tray-icoon,
-#                                         pauzeknop, per-account herstarten en een zichtbare melding als rechten ontbreken.
-#                                         Tegelen verdeelt de accounts nu over alle monitoren naar oppervlak.
+#                                         pauzeknop, accounts los herstarten en een zichtbare melding als rechten ontbreken.
+#                                         De accounts worden nu naar schermoppervlak over alle monitoren verdeeld.
 #
 #------------------------------------------------------------------------------------#
 
