@@ -21,6 +21,9 @@
 # 005          25-09-2026 Miniwar AFK FG  Client die wel start maar nooit in de game komt wordt herstart (geen disconnectcode
 #                                         bij "failed to connect"), zwerfprocessen zonder venster worden opgeruimd,
 #                                         fatale fouten gaan naar het logbestand in plaats van alleen het console.
+# 006          26-09-2026 Miniwar AFK FG  Statusvenster in plaats van een console: de lus is nu een state machine die per
+#                                         tick een stap zet, zodat het venster niet vastloopt tijdens een launch. Tray-icoon,
+#                                         pauzeknop, per-account herstarten en een zichtbare melding als rechten ontbreken.
 #
 #------------------------------------------------------------------------------------#
 
@@ -30,7 +33,17 @@ Add-Type -AssemblyName System.Net.Http
 
 $processName = "RobloxPlayerBeta"
 $minimumClientBytes = 500MB
-$checkIntervalSeconds = 10
+
+# The window runs the show now: a timer ticks often and cheaply, launches advance one
+# step per tick, and the heavier checks run on every 40th tick. Nothing blocks, so the
+# window stays responsive even while six accounts are relaunching.
+$tickMilliseconds = 250
+$slowTicksPerCheck = 40                                                              # 40 x 250 ms = 10 s, as before
+$uiTicksPerRefresh = 4                                                               # redraw once a second
+$launchTimeoutSeconds = 90                                                           # no new client window by then = failed launch
+$logTimeoutSeconds = 30                                                              # no log file by then = failed launch
+$windowTimeoutSeconds = 60                                                           # no window by then = leave it untiled
+$windowSettleSeconds = 5                                                             # let Roblox restore its own size before moving it
 $maximumLaunchFailures = 5                                                           # log loudly after this many failed launches in a row
 $logFolder = Join-Path $env:LOCALAPPDATA "Roblox\logs"                              # Roblox client log files
 $disconnectPattern = "Sending disconnect with reason: (\d+)"                         # logged on drop (277) and leave (285)
@@ -53,10 +66,17 @@ $settingsPath = Join-Path $settingsFolder "RobloxWatchdog.json"
 $legacySettingsPath = Join-Path $scriptFolder "RobloxWatchdog.json"                  # pre-003 location, migrated on first run
 $logFilePath = Join-Path $settingsFolder "RobloxWatchdog.log"
 
+$recentLogLines = New-Object System.Collections.Generic.List[string]                  # what the Log window shows
+
 function Write-Log($message)
 {
     $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $message"
-    Write-Host $line
+
+    # Deliberately no Write-Host: built with -noConsole, and ps2exe turns every
+    # Write-Host into a message box, which a chatty log would bury the screen in
+    $recentLogLines.Add($line)
+    while ($recentLogLines.Count -gt 500) { $recentLogLines.RemoveAt(0) }
+
     try
     {
         if ((Test-Path $logFilePath) -and (Get-Item $logFilePath).Length -gt 5MB)
@@ -294,9 +314,12 @@ function Show-SettingsWindow($saved)
     $form.Controls.Add($startButton)
     $form.AcceptButton = $startButton
 
+    # $null rather than exiting, so the status window can reopen this dialog later
+    # and a cancel just means "never mind" instead of closing the whole app
     if ($form.ShowDialog() -ne "OK")
     {
-        exit 0
+        $form.Dispose()
+        return $null
     }
 
     $result = @{}
@@ -361,6 +384,7 @@ $settings = Get-SavedSettings
 while ($true)
 {
     $settings = Show-SettingsWindow $settings
+    if (-not $settings) { exit 0 }                                                   # cancelled on the way in
     try
     {
         Test-Settings $settings
@@ -468,26 +492,12 @@ public class WinPos
 
 function Set-ClientWindow($processId, $slotIndex)
 {
-    # Roblox creates its window a few seconds after the process starts
-    $process = $null
-    for ($attempt = 0; $attempt -lt 30; $attempt++)
-    {
-        Start-Sleep -Seconds 2
-        $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
-        if ($process -and $process.MainWindowHandle -ne 0)
-        {
-            break
-        }
-    }
-    if (-not $process -or $process.MainWindowHandle -eq 0)
-    {
-        # Tiling is cosmetic: a client without a window keeps running, just untiled
-        Write-Log "WARNING: client PID $processId never showed a window, leaving it untiled"
-        return
-    }
-
-    # Roblox restores its own saved size right after the window appears; move after that
-    Start-Sleep -Seconds 5
+    # Nothing here waits: the Tiling state does the waiting, one step per tick, so the
+    # status window stays responsive instead of freezing for a minute per launch
+    $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if (-not $process) { return $false }
+    $process.Refresh()
+    if ($process.MainWindowHandle -eq [IntPtr]::Zero) { return $false }
 
     $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
     $columns = [math]::Ceiling([math]::Sqrt($allAccounts.Count))
@@ -512,12 +522,12 @@ function Set-ClientWindow($processId, $slotIndex)
     if ($moved -and $readBack -and $offBy -le 40)
     {
         Write-Log "moved PID $processId to slot $slotIndex ($x,$y $($tileWidth)x$($tileHeight))"
+        return $true
     }
-    else
-    {
-        Write-Log "WARNING: PID $processId did not move to slot $slotIndex (asked for $x,$y, it sits at $($rect.Left),$($rect.Top))"
-        Write-ElevationHint
-    }
+
+    Write-Log "WARNING: PID $processId did not move to slot $slotIndex (asked for $x,$y, it sits at $($rect.Left),$($rect.Top))"
+    Write-ElevationHint
+    return $false
 }
 
 function Remove-StrayClients
@@ -553,6 +563,7 @@ function Remove-StrayClients
             {
                 $ageMinutes = ((Get-Date) - $process.StartTime).TotalMinutes
                 Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                $script:strayClosedCount++
                 Write-Log "closed stray PID $($process.Id) (no window, $([int]$ageMinutes) min old, $([int]($process.WorkingSet64 / 1MB)) MB)"
             }
             elseif (-not $reportedStrays.ContainsKey($process.Id))
@@ -642,7 +653,7 @@ function Get-LaunchUrl($accountName)
 function Invoke-AccountManager($url)
 {
     # RAM answers LaunchAccount with 400 even when the launch works, so the status code
-    # is only logged; the new Roblox window in Start-Client is the real success check
+    # is only logged; the new Roblox window found in Step-Launching is the real check
     Write-Log "RAM: $($url -replace 'Password=[^&]+', 'Password=***')"
     try
     {
@@ -659,63 +670,139 @@ function Invoke-AccountManager($url)
     return $reply
 }
 
-function Start-Client($accountName)
+function Request-Launch($accountName)
 {
-    $trackedIds = @($sessions.Values | ForEach-Object { $_.ProcessId })
+    # Only asks RAM to launch. Watching for the client happens in Step-Launching, one
+    # look per tick, so nothing blocks the status window.
+    $session = $sessions[$accountName]
+    Set-RobloxFramerateCap                                                            # a client that just closed may have reset it
 
-    $launchUrl = Get-LaunchUrl $accountName
-    $ramReply = Invoke-AccountManager $launchUrl                                      # last RAM answer
+    $session.LaunchTrackedIds = @($sessions.Values | ForEach-Object { $_.ProcessId } | Where-Object { $_ -ne 0 })
+    $session.LaunchedAt = Get-Date                                                    # log files after this are new
+    $session.InstallerKilled = $false
+    $session.LaunchUrl = Get-LaunchUrl $accountName
+
+    Invoke-AccountManager $session.LaunchUrl | Out-Null
     Write-Log "launched $accountName"
+    Set-SessionState $session "Launching"
+}
 
-    # Poll every 200 ms so we kill RobloxInstaller before it can close other instances
-    $installerKilled = $false
-    for ($attempt = 0; $attempt -lt 450; $attempt++)   # 450 x 200 ms = 90 s
+function Step-Launching($accountName)
+{
+    $session = $sessions[$accountName]
+
+    # Checked every tick so the installer dies before it can close other instances
+    $installer = Get-Process "RobloxInstaller" -ErrorAction SilentlyContinue
+    if ($installer)
     {
-        Start-Sleep -Milliseconds 200
-
-        $installer = Get-Process "RobloxInstaller" -ErrorAction SilentlyContinue
-        if ($installer)
+        $installer | Stop-Process -Force -ErrorAction SilentlyContinue
+        if (-not $session.InstallerKilled)
         {
-            $installer | Stop-Process -Force -ErrorAction SilentlyContinue
-            if (-not $installerKilled)
+            $session.InstallerKilled = $true
+            Write-Log "killed RobloxInstaller for $accountName, retrying launch (a Roblox update in progress may need repairing)"
+            Invoke-AccountManager $session.LaunchUrl | Out-Null
+        }
+    }
+
+    $newClient = Get-Process $processName -ErrorAction SilentlyContinue |
+        Where-Object { $session.LaunchTrackedIds -notcontains $_.Id -and $_.MainWindowHandle -ne 0 } |
+        Sort-Object StartTime |
+        Select-Object -First 1
+
+    if ($newClient)
+    {
+        $session.ProcessId = $newClient.Id
+        $session.ProcessStartTime = $newClient.StartTime
+        Set-SessionState $session "FindingLog"
+        return
+    }
+
+    if (((Get-Date) - $session.StateSince).TotalSeconds -gt $launchTimeoutSeconds)
+    {
+        throw "no new Roblox window appeared within $launchTimeoutSeconds s"
+    }
+}
+
+function Step-FindingLog($accountName)
+{
+    # Launches run one at a time, so the oldest unclaimed log since launch is this client's
+    $session = $sessions[$accountName]
+    $takenPaths = @($sessions.Values | ForEach-Object { $_.LogPath })
+    $logFile = Get-PlayerLogFiles |
+        Where-Object { $_.CreationTime -ge $session.LaunchedAt -and $takenPaths -notcontains $_.FullName } |
+        Sort-Object CreationTime |
+        Select-Object -First 1
+
+    if ($logFile)
+    {
+        $session.LogPath = $logFile.FullName
+        $session.LogOffset = 0
+        $session.StartedAt = Get-Date
+        $session.JoinedAt = $null                                                     # not in the game until the log says so
+        $session.LastInputAt = Get-Date                                               # joining counts as input
+        $session.WindowSeenAt = $null
+        Write-Log "$accountName running as PID $($session.ProcessId), log $(Split-Path -Leaf $session.LogPath)"
+
+        # Staggers the next launch so accounts don't join at the same second
+        foreach ($otherSession in $sessions.Values)
+        {
+            if ($otherSession.State -eq "Idle")
             {
-                $installerKilled = $true
-                Write-Log "killed RobloxInstaller for $accountName, retrying launch (a Roblox update in progress may need repairing)"
-                Start-Sleep -Milliseconds 500
-                $ramReply = Invoke-AccountManager $launchUrl
+                $otherSession.RelaunchAfter = (Get-Date).AddSeconds($relaunchDelaySeconds)
             }
         }
 
-        $newClient = Get-Process $processName -ErrorAction SilentlyContinue |
-            Where-Object { $trackedIds -notcontains $_.Id -and $_.MainWindowHandle -ne 0 } |
-            Sort-Object StartTime |
-            Select-Object -First 1
-
-        if ($newClient) { return $newClient }
+        Set-SessionState $session "Tiling"
+        return
     }
 
-    throw "No new Roblox window appeared after launching $accountName (RAM replied: $ramReply)"
+    if (((Get-Date) - $session.StateSince).TotalSeconds -gt $logTimeoutSeconds)
+    {
+        # Don't leave a half-started client running untracked
+        Stop-Process -Id $session.ProcessId -Force -ErrorAction SilentlyContinue
+        $session.ProcessId = 0
+        $session.ProcessStartTime = $null
+        throw "no new *_Player_*.log appeared within $logTimeoutSeconds s"
+    }
+}
+
+function Step-Tiling($accountName)
+{
+    $session = $sessions[$accountName]
+    $process = Get-SessionProcess $session
+    if (-not $process)
+    {
+        Set-SessionState $session "Running"                                           # already gone; the running checks will catch it
+        return
+    }
+    $process.Refresh()
+
+    if ($process.MainWindowHandle -eq [IntPtr]::Zero)
+    {
+        if (((Get-Date) - $session.StateSince).TotalSeconds -gt $windowTimeoutSeconds)
+        {
+            # Tiling is cosmetic: a client without a window keeps running, just untiled
+            Write-Log "WARNING: $accountName never showed a window, leaving it untiled"
+            Set-SessionState $session "Running"
+        }
+        return
+    }
+
+    # Roblox restores its own saved size right after the window appears; move after that
+    if (-not $session.WindowSeenAt)
+    {
+        $session.WindowSeenAt = Get-Date
+        return
+    }
+    if (((Get-Date) - $session.WindowSeenAt).TotalSeconds -lt $windowSettleSeconds) { return }
+
+    Set-ClientWindow $session.ProcessId ([array]::IndexOf($allAccounts, $accountName)) | Out-Null
+    Set-SessionState $session "Running"
 }
 
 function Get-PlayerLogFiles
 {
     Get-ChildItem $logFolder -Filter "*_Player_*.log" -ErrorAction Stop
-}
-
-function Find-NewLogFile($launchTime)
-{
-    # Launches run one at a time, so the oldest unclaimed log since launch is this client's
-    $takenPaths = @($sessions.Values | ForEach-Object { $_.LogPath })
-    for ($attempt = 0; $attempt -lt 30; $attempt++)
-    {
-        $logFile = Get-PlayerLogFiles |
-            Where-Object { $_.CreationTime -ge $launchTime -and $takenPaths -notcontains $_.FullName } |
-            Sort-Object CreationTime |
-            Select-Object -First 1
-        if ($logFile) { return $logFile.FullName }
-        Start-Sleep -Seconds 1
-    }
-    throw "No new *_Player_*.log appeared in $logFolder after launching at $launchTime"
 }
 
 function Find-StartupLogFile($process)
@@ -782,44 +869,10 @@ function Update-SessionFromLog($session)
     return $null
 }
 
-function Start-Session($accountName)
+function Set-SessionState($session, $state)
 {
-    $session = $sessions[$accountName]
-    Set-RobloxFramerateCap                                                            # a client that just closed may have reset it
-    $launchTime = Get-Date                                                            # log files after this are new
-    $process = Start-Client $accountName
-
-    # The session is only filled in once the log is found, so a half-started client
-    # is never left running untracked
-    try
-    {
-        $logPath = Find-NewLogFile $launchTime
-    }
-    catch
-    {
-        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-        throw
-    }
-
-    $session.ProcessId = $process.Id
-    $session.ProcessStartTime = $process.StartTime
-    $session.LogPath = $logPath
-    $session.LogOffset = 0
-    $session.StartedAt = Get-Date
-    $session.JoinedAt = $null                                                         # not in the game until the log says so
-    $session.LastInputAt = Get-Date                                                   # joining counts as input
-    Write-Log "$accountName running as PID $($session.ProcessId), log $(Split-Path -Leaf $session.LogPath)"
-
-    # Staggers the next launch so accounts don't join at the same second
-    foreach ($otherSession in $sessions.Values)
-    {
-        if ($otherSession.ProcessId -eq 0)
-        {
-            $otherSession.RelaunchAfter = (Get-Date).AddSeconds($relaunchDelaySeconds)
-        }
-    }
-
-    Set-ClientWindow $session.ProcessId ([array]::IndexOf($allAccounts, $accountName))
+    $session.State = $state
+    $session.StateSince = Get-Date
 }
 
 function Stop-Session($accountName, $reason)
@@ -834,8 +887,61 @@ function Stop-Session($accountName, $reason)
     $session.ProcessId = 0
     $session.ProcessStartTime = $null
     $session.LogPath = $null
+    $session.JoinedAt = $null
     $session.RelaunchAfter = (Get-Date).AddSeconds($relaunchDelaySeconds)
+    Set-SessionState $session "Idle"
 }
+
+function Register-LaunchFailure($accountName, $message)
+{
+    # Back off a little further each time instead of hammering RAM, but never give up:
+    # an account that cannot start yet keeps being retried
+    $session = $sessions[$accountName]
+    $session.FailureCount++
+    $backoffSeconds = [math]::Min($relaunchDelaySeconds * $session.FailureCount, 600)
+    $session.RelaunchAfter = (Get-Date).AddSeconds($backoffSeconds)
+    Set-SessionState $session "Idle"
+
+    Write-Log "WARNING: launching $accountName failed ($($session.FailureCount)x): $message"
+    if ($session.FailureCount -eq $maximumLaunchFailures)
+    {
+        Write-Log "ERROR: $accountName has failed $maximumLaunchFailures launches in a row, is RAM running with the web server on?"
+    }
+    Write-Log "retrying $accountName in $backoffSeconds s"
+}
+
+function Get-SessionStatusText($accountName)
+{
+    $session = $sessions[$accountName]
+    if ($session.Paused) { return "paused" }
+
+    if ($session.State -eq "Idle")
+    {
+        $waitSeconds = [int](($session.RelaunchAfter - (Get-Date)).TotalSeconds)
+        if ($waitSeconds -gt 0) { return "relaunching in $waitSeconds s" }
+        return "waiting"
+    }
+    if ($session.State -eq "Launching")  { return "launching" }
+    if ($session.State -eq "FindingLog") { return "finding log" }
+    if ($session.State -eq "Tiling")     { return "positioning" }
+    if ($session.State -eq "Running")
+    {
+        if ($session.JoinedAt) { return "playing" }
+        return "joining"
+    }
+    return $session.State
+}
+
+function Get-SessionColor($accountName)
+{
+    $session = $sessions[$accountName]
+    if ($session.Paused) { return [System.Drawing.Color]::FromArgb(150, 150, 150) }
+    if ($session.State -eq "Running" -and $session.JoinedAt) { return [System.Drawing.Color]::FromArgb(30, 150, 60) }
+    if ($session.State -eq "Idle") { return [System.Drawing.Color]::FromArgb(150, 150, 150) }
+    return [System.Drawing.Color]::FromArgb(220, 140, 0)
+}
+
+# ---- State ------------------------------------------------------------------------
 
 # Main first, so it is relaunched before any alt
 $allAccounts = @($mainAccount) + $altAccounts
@@ -844,8 +950,21 @@ foreach ($accountName in $allAccounts)
 {
     $sessions[$accountName] = @{ ProcessId = 0; ProcessStartTime = $null; StartedAt = $null
                                  RelaunchAfter = (Get-Date); LogPath = $null; LogOffset = 0; FailureCount = 0
-                                 LastInputAt = $null; JoinedAt = $null }
+                                 LastInputAt = $null; JoinedAt = $null
+                                 State = "Idle"; StateSince = (Get-Date)
+                                 LaunchTrackedIds = @(); LaunchedAt = $null; InstallerKilled = $false
+                                 LaunchUrl = $null; WindowSeenAt = $null; Paused = $false }
 }
+
+$globalPaused = $false
+$reallyExit = $false
+$strayClosedCount = 0
+$lastDisconnectAt = $null
+$lastFreeMegabytes = 0
+$watchdogStartedAt = Get-Date
+$tickCount = 0
+$logForm = $null
+$logBox = $null
 
 Write-Log "watchdog started, settings in $settingsPath, log in $logFilePath"
 if ($isElevated)
@@ -870,6 +989,7 @@ if ($runningMain)
     $sessions[$mainAccount].StartedAt = $runningMain.StartTime
     $sessions[$mainAccount].LastInputAt = Get-Date                                    # unknown when it last had input, so start the clock now
     $sessions[$mainAccount].JoinedAt = Get-Date                                       # it was already playing, so don't hold it to the join timeout
+    Set-SessionState $sessions[$mainAccount] "Running"
     try
     {
         $sessions[$mainAccount].LogPath = Find-StartupLogFile $runningMain
@@ -880,7 +1000,7 @@ if ($runningMain)
         # Without a log we cannot see main disconnect, but it is still tracked and tiled
         Write-Log "WARNING: adopted PID $($runningMain.Id) as main $mainAccount but found no matching log, disconnect detection stays off for main until it relaunches"
     }
-    Set-ClientWindow $runningMain.Id 0                                                # main is always slot 0
+    Set-ClientWindow $runningMain.Id 0 | Out-Null                                     # main is always slot 0
 }
 Write-Log "alts: $($altAccounts -join ', ')"
 
@@ -894,106 +1014,498 @@ if ($closeOtherClients)
         }
 }
 
-while ($true)
+# ---- Status window ----------------------------------------------------------------
+
+$greyText = [System.Drawing.Color]::FromArgb(110, 110, 110)
+
+$statusForm = New-Object System.Windows.Forms.Form
+$statusForm.Text = "Roblox Watchdog"
+$statusForm.Size = New-Object System.Drawing.Size(580, 600)
+$statusForm.StartPosition = "CenterScreen"
+$statusForm.FormBorderStyle = "FixedSingle"
+$statusForm.MaximizeBox = $false
+$statusForm.BackColor = [System.Drawing.Color]::White
+$statusForm.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+
+# Always present rather than shown only on trouble, so the layout never shifts and the
+# answer to "is this elevated" is on screen instead of buried in the log
+$elevationStrip = New-Object System.Windows.Forms.Label
+$elevationStrip.Location = New-Object System.Drawing.Point(0, 0)
+$elevationStrip.Size = New-Object System.Drawing.Size(564, 44)
+$elevationStrip.TextAlign = "MiddleLeft"
+$elevationStrip.Padding = New-Object System.Windows.Forms.Padding(14, 0, 14, 0)
+if ($isElevated)
 {
-    # Nothing in here is fatal: a bad tick is logged and retried on the next one
+    $elevationStrip.Text = "Running as administrator."
+    $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(230, 245, 233)
+    $elevationStrip.ForeColor = [System.Drawing.Color]::FromArgb(25, 110, 50)
+}
+else
+{
+    $elevationStrip.Text = "Not running as administrator. If Account Manager is elevated, tiling, anti-idle and closing strays will be denied."
+    $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(255, 244, 205)
+    $elevationStrip.ForeColor = [System.Drawing.Color]::FromArgb(130, 80, 0)
+}
+$statusForm.Controls.Add($elevationStrip)
+
+$headline = New-Object System.Windows.Forms.Label
+$headline.Location = New-Object System.Drawing.Point(14, 58)
+$headline.Size = New-Object System.Drawing.Size(536, 40)
+$headline.Font = New-Object System.Drawing.Font("Segoe UI", 19)
+$headline.TextAlign = "MiddleCenter"
+$headline.Text = "starting"
+$statusForm.Controls.Add($headline)
+
+function New-Tile($caption, $x, $y)
+{
+    $captionLabel = New-Object System.Windows.Forms.Label
+    $captionLabel.Location = New-Object System.Drawing.Point($x, $y)
+    $captionLabel.Size = New-Object System.Drawing.Size(250, 16)
+    $captionLabel.ForeColor = $greyText
+    $captionLabel.Text = $caption
+    $statusForm.Controls.Add($captionLabel)
+
+    $valueLabel = New-Object System.Windows.Forms.Label
+    $valueLabel.Location = New-Object System.Drawing.Point($x, ($y + 17))
+    $valueLabel.Size = New-Object System.Drawing.Size(250, 25)
+    $valueLabel.Font = New-Object System.Drawing.Font("Segoe UI", 12)
+    $valueLabel.Text = "-"
+    $statusForm.Controls.Add($valueLabel)
+    return $valueLabel
+}
+
+$tileFreeRam  = New-Tile "free memory"     28 108
+$tileStrays   = New-Tile "strays closed"   300 108
+$tileUptime   = New-Tile "watchdog uptime" 28 156
+$tileLastDrop = New-Tile "last disconnect" 300 156
+
+$accountList = New-Object System.Windows.Forms.ListView
+$accountList.Location = New-Object System.Drawing.Point(14, 208)
+$accountList.Size = New-Object System.Drawing.Size(536, 206)
+$accountList.View = "Details"
+$accountList.FullRowSelect = $true
+$accountList.GridLines = $false
+$accountList.HeaderStyle = "Nonclickable"
+$accountList.MultiSelect = $false
+$accountList.Columns.Add("", 28) | Out-Null
+$accountList.Columns.Add("Account", 168) | Out-Null
+$accountList.Columns.Add("Status", 156) | Out-Null
+$accountList.Columns.Add("Memory", 78) | Out-Null
+$accountList.Columns.Add("Up", 102) | Out-Null                                        # fills the rest, so no empty sliver column
+foreach ($accountName in $allAccounts)
+{
+    $item = New-Object System.Windows.Forms.ListViewItem("")
+    $item.UseItemStyleForSubItems = $false                                            # so only the dot is coloured
+    $item.SubItems.Add($accountName) | Out-Null
+    $item.SubItems.Add("") | Out-Null
+    $item.SubItems.Add("") | Out-Null
+    $item.SubItems.Add("") | Out-Null
+    $item.Tag = $accountName
+    $accountList.Items.Add($item) | Out-Null
+}
+$statusForm.Controls.Add($accountList)
+
+$relaunchButton = New-Object System.Windows.Forms.Button
+$relaunchButton.Text = "Relaunch selected"
+$relaunchButton.Location = New-Object System.Drawing.Point(14, 424)
+$relaunchButton.Size = New-Object System.Drawing.Size(140, 27)
+$relaunchButton.Enabled = $false
+$statusForm.Controls.Add($relaunchButton)
+
+$pauseAccountButton = New-Object System.Windows.Forms.Button
+$pauseAccountButton.Text = "Pause selected"
+$pauseAccountButton.Location = New-Object System.Drawing.Point(162, 424)
+$pauseAccountButton.Size = New-Object System.Drawing.Size(140, 27)
+$pauseAccountButton.Enabled = $false
+$statusForm.Controls.Add($pauseAccountButton)
+
+$settingsButton = New-Object System.Windows.Forms.Button
+$settingsButton.Text = "Settings"
+$settingsButton.Location = New-Object System.Drawing.Point(14, 468)
+$settingsButton.Size = New-Object System.Drawing.Size(100, 30)
+$statusForm.Controls.Add($settingsButton)
+
+$pauseButton = New-Object System.Windows.Forms.Button
+$pauseButton.Text = "Pause"
+$pauseButton.Location = New-Object System.Drawing.Point(122, 468)
+$pauseButton.Size = New-Object System.Drawing.Size(100, 30)
+$statusForm.Controls.Add($pauseButton)
+
+$logButton = New-Object System.Windows.Forms.Button
+$logButton.Text = "Log"
+$logButton.Location = New-Object System.Drawing.Point(230, 468)
+$logButton.Size = New-Object System.Drawing.Size(100, 30)
+$statusForm.Controls.Add($logButton)
+
+$exitButton = New-Object System.Windows.Forms.Button
+$exitButton.Text = "Exit"
+$exitButton.Location = New-Object System.Drawing.Point(450, 468)
+$exitButton.Size = New-Object System.Drawing.Size(100, 30)
+$statusForm.Controls.Add($exitButton)
+
+$hintLabel = New-Object System.Windows.Forms.Label
+$hintLabel.Location = New-Object System.Drawing.Point(14, 508)
+$hintLabel.Size = New-Object System.Drawing.Size(536, 18)
+$hintLabel.ForeColor = $greyText
+$hintLabel.Text = "Closing this window keeps the watchdog running in the tray. Use Exit to stop it."
+$statusForm.Controls.Add($hintLabel)
+
+# ---- Tray -------------------------------------------------------------------------
+
+$trayIcon = New-Object System.Windows.Forms.NotifyIcon
+$trayIcon.Icon = [System.Drawing.SystemIcons]::Application
+$trayIcon.Text = "Roblox Watchdog"
+$trayIcon.Visible = $true
+
+$trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$trayShowItem = $trayMenu.Items.Add("Show")
+$trayExitItem = $trayMenu.Items.Add("Exit")
+$trayIcon.ContextMenuStrip = $trayMenu
+
+function Show-StatusWindow
+{
+    $statusForm.Show()
+    $statusForm.WindowState = "Normal"
+    $statusForm.Activate()
+}
+
+$trayShowItem.Add_Click({ Show-StatusWindow })
+$trayIcon.Add_DoubleClick({ Show-StatusWindow })
+$trayExitItem.Add_Click({
+    $script:reallyExit = $true
+    $statusForm.Close()
+})
+
+# ---- Window behaviour -------------------------------------------------------------
+
+$statusForm.Add_FormClosing({
+    param($eventSender, $eventArgs)
+    # The X minimises to the tray: stopping the watchdog should be deliberate
+    if (-not $script:reallyExit)
+    {
+        $eventArgs.Cancel = $true
+        $statusForm.Hide()
+        $trayIcon.ShowBalloonTip(2500, "Roblox Watchdog", "Still running. Double-click the tray icon to bring it back.", "Info")
+    }
+})
+
+$statusForm.Add_FormClosed({
+    $trayIcon.Visible = $false
+    $trayIcon.Dispose()
+})
+
+$exitButton.Add_Click({
+    $script:reallyExit = $true
+    $statusForm.Close()
+})
+
+$pauseButton.Add_Click({
+    $script:globalPaused = -not $script:globalPaused
+    if ($script:globalPaused)
+    {
+        $pauseButton.Text = "Resume"
+        Write-Log "paused from the window: no relaunching, anti-idle or stray cleanup"
+    }
+    else
+    {
+        $pauseButton.Text = "Pause"
+        Write-Log "resumed from the window"
+    }
+})
+
+$relaunchButton.Add_Click({
+    if ($accountList.SelectedItems.Count -eq 0) { return }
+    $accountName = $accountList.SelectedItems[0].Tag
+    $session = $sessions[$accountName]
+    if ($session.State -ne "Idle")
+    {
+        Stop-Session $accountName "relaunch asked for from the window"
+    }
+    $session.FailureCount = 0
+    $session.RelaunchAfter = Get-Date
+    $session.Paused = $false
+})
+
+$pauseAccountButton.Add_Click({
+    if ($accountList.SelectedItems.Count -eq 0) { return }
+    $accountName = $accountList.SelectedItems[0].Tag
+    $session = $sessions[$accountName]
+    $session.Paused = -not $session.Paused
+    if ($session.Paused)
+    {
+        Write-Log "$accountName paused from the window, it will not be relaunched or poked"
+    }
+    else
+    {
+        $session.RelaunchAfter = Get-Date
+        Write-Log "$accountName resumed from the window"
+    }
+})
+
+$logButton.Add_Click({
+    if ($script:logForm -and -not $script:logForm.IsDisposed)
+    {
+        $script:logForm.Activate()
+        return
+    }
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Roblox Watchdog - log"
+    $form.Size = New-Object System.Drawing.Size(940, 520)
+    $form.StartPosition = "CenterParent"
+    $form.BackColor = [System.Drawing.Color]::White
+
+    $box = New-Object System.Windows.Forms.TextBox
+    $box.Multiline = $true
+    $box.ReadOnly = $true
+    $box.ScrollBars = "Both"
+    $box.WordWrap = $false
+    $box.Dock = "Fill"
+    $box.BackColor = [System.Drawing.Color]::White
+    $box.BorderStyle = "None"
+    $box.Font = New-Object System.Drawing.Font("Consolas", 9)
+    $form.Controls.Add($box)
+
+    $script:logForm = $form
+    $script:logBox = $box
+    $form.Add_FormClosed({
+        $script:logForm = $null
+        $script:logBox = $null
+    })
+    $form.Show()
+})
+
+$settingsButton.Add_Click({
+    $updated = Show-SettingsWindow (Get-SavedSettings)
+    if (-not $updated) { return }
     try
     {
-        $freeMegabytes = Get-FreeMegabytes
-        if ($freeMegabytes -lt $minimumFreeMegabytes)
-        {
-            $largestAlt = Get-RobloxClients |
-                Where-Object { $_.Id -ne $sessions[$mainAccount].ProcessId } |
-                Sort-Object WorkingSet64 -Descending |
-                Select-Object -First 1
+        Test-Settings $updated
+    }
+    catch
+    {
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Check your settings",
+            [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
+    }
+    Save-Settings $updated
 
-            if ($largestAlt)
-            {
-                Stop-Process -Id $largestAlt.Id -Force -ErrorAction SilentlyContinue
-                Write-Log "killed PID $($largestAlt.Id) ($([int]($largestAlt.WorkingSet64 / 1MB)) MB), free was $([int]$freeMegabytes) MB"
-            }
-            else
-            {
-                Write-Log "WARNING: only $([int]$freeMegabytes) MB free and no alt left to kill"
-            }
+    # The numbers take effect straight away; the account list would need every session
+    # rebuilt, so that one waits for a restart
+    $script:minimumFreeMegabytes = [int]$updated.MinimumFreeMegabytes
+    $script:relaunchDelaySeconds = [int]$updated.RelaunchDelaySeconds
+    $script:maximumSessionMinutes = [int]$updated.MaximumSessionMinutes
+    $script:framerateCap = [int]$updated.FramerateCap
+    $script:antiIdleMinutes = [int]$updated.AntiIdleMinutes
+    $script:antiIdleKey = $updated.AntiIdleKey
+    $script:antiIdleVirtualKey = if ($updated.AntiIdleKey -eq "Space") { [byte]0x20 } else { [byte][char]([string]$updated.AntiIdleKey).ToUpper() }
+    $script:reapStrayMinutes = [int]$updated.ReapStrayMinutes
+    $script:closeOtherClients = ($updated.CloseOtherClients -ne "False")
+    Write-Log "settings saved and applied"
+
+    if ($updated.MainAccount -ne $mainAccount -or $updated.AltAccounts -ne $settings.AltAccounts)
+    {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Saved. The account list takes effect the next time you start the watchdog.",
+            "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+    }
+})
+
+# ---- Refresh ----------------------------------------------------------------------
+
+function Update-StatusUi
+{
+    $playing = 0
+    foreach ($item in $accountList.Items)
+    {
+        $accountName = $item.Tag
+        $session = $sessions[$accountName]
+
+        $item.Text = "  " + [char]0x25CF
+        $item.ForeColor = Get-SessionColor $accountName
+
+        $label = $accountName
+        if ($accountName -eq $mainAccount) { $label += "   (main)" }
+        $item.SubItems[1].Text = $label
+        $item.SubItems[2].Text = Get-SessionStatusText $accountName
+
+        $process = Get-SessionProcess $session
+        if ($process)
+        {
+            $item.SubItems[3].Text = "{0:N1} GB" -f ($process.WorkingSet64 / 1GB)
+        }
+        else
+        {
+            $item.SubItems[3].Text = "-"
+        }
+
+        if ($session.StartedAt -and $session.State -eq "Running")
+        {
+            $upFor = (Get-Date) - $session.StartedAt
+            $item.SubItems[4].Text = "{0}h{1:00}m" -f [int]$upFor.TotalHours, $upFor.Minutes
+        }
+        else
+        {
+            $item.SubItems[4].Text = "-"
+        }
+
+        if ($session.State -eq "Running" -and $session.JoinedAt) { $playing++ }
+    }
+
+    $headline.Text = "$playing / $($allAccounts.Count) accounts playing"
+    if ($script:globalPaused) { $headline.Text = $headline.Text + "   (paused)" }
+
+    $tileFreeRam.Text = "$script:lastFreeMegabytes MB"
+    $tileStrays.Text = "$script:strayClosedCount"
+
+    $watchdogUp = (Get-Date) - $watchdogStartedAt
+    $tileUptime.Text = "{0}h{1:00}m" -f [int]$watchdogUp.TotalHours, $watchdogUp.Minutes
+
+    if ($script:lastDisconnectAt)
+    {
+        $tileLastDrop.Text = "{0} min ago" -f [int](((Get-Date) - $script:lastDisconnectAt).TotalMinutes)
+    }
+    else
+    {
+        $tileLastDrop.Text = "none yet"
+    }
+
+    $hasSelection = $accountList.SelectedItems.Count -gt 0
+    $relaunchButton.Enabled = $hasSelection
+    $pauseAccountButton.Enabled = $hasSelection
+    if ($hasSelection)
+    {
+        if ($sessions[$accountList.SelectedItems[0].Tag].Paused)
+        {
+            $pauseAccountButton.Text = "Resume selected"
+        }
+        else
+        {
+            $pauseAccountButton.Text = "Pause selected"
         }
     }
-    catch
+
+    if ($script:logBox -and -not $script:logBox.IsDisposed)
     {
-        Write-Log "WARNING: memory check failed: $($_.Exception.Message)"
+        # Only rewrite when there is something new, otherwise the caret fights the user
+        if ($script:logBox.Lines.Count -ne $recentLogLines.Count)
+        {
+            $script:logBox.Text = ($recentLogLines -join "`r`n")
+            $script:logBox.SelectionStart = $script:logBox.TextLength
+            $script:logBox.ScrollToCaret()
+        }
+    }
+}
+
+# ---- Ticks ------------------------------------------------------------------------
+
+function Invoke-SlowChecks
+{
+    if (-not $script:globalPaused)
+    {
+        try
+        {
+            $freeMegabytes = Get-FreeMegabytes
+            $script:lastFreeMegabytes = [int]$freeMegabytes
+            if ($freeMegabytes -lt $minimumFreeMegabytes)
+            {
+                $largestAlt = Get-RobloxClients |
+                    Where-Object { $_.Id -ne $sessions[$mainAccount].ProcessId } |
+                    Sort-Object WorkingSet64 -Descending |
+                    Select-Object -First 1
+
+                if ($largestAlt)
+                {
+                    Stop-Process -Id $largestAlt.Id -Force -ErrorAction SilentlyContinue
+                    Write-Log "killed PID $($largestAlt.Id) ($([int]($largestAlt.WorkingSet64 / 1MB)) MB), free was $([int]$freeMegabytes) MB"
+                }
+                else
+                {
+                    Write-Log "WARNING: only $([int]$freeMegabytes) MB free and no alt left to kill"
+                }
+            }
+        }
+        catch
+        {
+            Write-Log "WARNING: memory check failed: $($_.Exception.Message)"
+        }
+
+        try
+        {
+            Remove-StrayClients
+        }
+        catch
+        {
+            Write-Log "WARNING: stray cleanup failed: $($_.Exception.Message)"
+        }
+    }
+    else
+    {
+        try { $script:lastFreeMegabytes = [int](Get-FreeMegabytes) } catch { }
     }
 
-    try
-    {
-        Remove-StrayClients
-    }
-    catch
-    {
-        Write-Log "WARNING: stray cleanup failed: $($_.Exception.Message)"
-    }
+    # Focusing a window and holding a key takes most of a second, so only one account
+    # gets poked per pass; several at once would visibly freeze the window
+    $antiIdleSentThisPass = $false
 
     foreach ($accountName in $allAccounts)
     {
         $session = $sessions[$accountName]
+        if ($session.Paused) { continue }
         try
         {
-            if ($session.ProcessId -eq 0)
+            if ($session.State -eq "Idle")
             {
-                if ((Get-Date) -ge $session.RelaunchAfter)
+                if (-not $script:globalPaused -and (Get-Date) -ge $session.RelaunchAfter)
                 {
                     try
                     {
-                        Start-Session $accountName
-                        $session.FailureCount = 0
+                        Request-Launch $accountName
                     }
                     catch
                     {
-                        # Back off a little further each time instead of hammering RAM, but
-                        # never give up: an account that cannot start yet keeps being retried
-                        $session.FailureCount++
-                        $backoffSeconds = [math]::Min($relaunchDelaySeconds * $session.FailureCount, 600)
-                        $session.RelaunchAfter = (Get-Date).AddSeconds($backoffSeconds)
-                        Write-Log "WARNING: launching $accountName failed ($($session.FailureCount)x): $($_.Exception.Message)"
-                        if ($session.FailureCount -eq $maximumLaunchFailures)
-                        {
-                            Write-Log "ERROR: $accountName has failed $maximumLaunchFailures launches in a row, is RAM running with the web server on?"
-                        }
-                        Write-Log "retrying $accountName in $backoffSeconds s"
+                        Register-LaunchFailure $accountName $_.Exception.Message
                     }
                 }
             }
-            elseif (-not (Get-SessionProcess $session))
+            elseif ($session.State -eq "Running")
             {
-                Stop-Session $accountName "is gone"
-            }
-            elseif ($session.LogPath)
-            {
-                $disconnectReason = Update-SessionFromLog $session                    # $null = still connected
-                if ($disconnectReason)
+                if (-not (Get-SessionProcess $session))
                 {
-                    Stop-Session $accountName "disconnected (reason $disconnectReason)"
+                    Stop-Session $accountName "is gone"
                 }
-                elseif (-not $session.JoinedAt -and $session.StartedAt -and
-                        ((Get-Date) - $session.StartedAt).TotalSeconds -gt $joinTimeoutSeconds)
+                elseif ($session.LogPath)
                 {
-                    # It launched and has a window, but never got into the game: it is
-                    # sitting on a "failed to connect" screen, which no disconnect code
-                    # is ever written for, so nothing else would notice it
-                    Stop-Session $accountName "never joined the game within $joinTimeoutSeconds s (stuck on an error screen)"
+                    $disconnectReason = Update-SessionFromLog $session                # $null = still connected
+                    if ($disconnectReason)
+                    {
+                        $script:lastDisconnectAt = Get-Date
+                        Stop-Session $accountName "disconnected (reason $disconnectReason)"
+                    }
+                    elseif (-not $session.JoinedAt -and $session.StartedAt -and
+                            ((Get-Date) - $session.StartedAt).TotalSeconds -gt $joinTimeoutSeconds)
+                    {
+                        # It launched and has a window, but never got into the game: it is
+                        # sitting on a "failed to connect" screen, which no disconnect code
+                        # is ever written for, so nothing else would notice it
+                        Stop-Session $accountName "never joined the game within $joinTimeoutSeconds s (stuck on an error screen)"
+                    }
+                    elseif ($accountName -ne $mainAccount -and $session.StartedAt -and
+                            ((Get-Date) - $session.StartedAt).TotalMinutes -gt $maximumSessionMinutes)
+                    {
+                        Stop-Session $accountName "is older than $maximumSessionMinutes min"
+                    }
                 }
-                elseif ($accountName -ne $mainAccount -and $session.StartedAt -and
-                        ((Get-Date) - $session.StartedAt).TotalMinutes -gt $maximumSessionMinutes)
-                {
-                    Stop-Session $accountName "is older than $maximumSessionMinutes min"
-                }
-            }
 
-            # Still tracked after the checks above, so it is due a keystroke if it has
-            # gone quiet; skipped for a session that was just stopped (ProcessId is 0)
-            if ($antiIdleMinutes -gt 0 -and $session.ProcessId -ne 0 -and $session.LastInputAt -and
-                ((Get-Date) - $session.LastInputAt).TotalMinutes -ge $antiIdleMinutes)
-            {
-                Send-AntiIdleInput $accountName
+                # Still running after the checks above, so it is due a keystroke if it
+                # has gone quiet
+                if ($antiIdleMinutes -gt 0 -and -not $script:globalPaused -and -not $antiIdleSentThisPass -and
+                    $session.State -eq "Running" -and
+                    $session.LastInputAt -and ((Get-Date) - $session.LastInputAt).TotalMinutes -ge $antiIdleMinutes)
+                {
+                    Send-AntiIdleInput $accountName
+                    $antiIdleSentThisPass = $true
+                }
             }
         }
         catch
@@ -1001,6 +1513,62 @@ while ($true)
             Write-Log "WARNING: checking $accountName failed: $($_.Exception.Message)"
         }
     }
-
-    Start-Sleep -Seconds $checkIntervalSeconds
 }
+
+function Invoke-WatchdogTick
+{
+    $script:tickCount++
+
+    # Every tick: move any launch along by one step. These are the only states that
+    # need to be watched closely, and each step returns immediately.
+    foreach ($accountName in $allAccounts)
+    {
+        $session = $sessions[$accountName]
+        if ($session.State -eq "Idle" -or $session.State -eq "Running") { continue }
+        try
+        {
+            if ($session.State -eq "Launching")      { Step-Launching $accountName }
+            elseif ($session.State -eq "FindingLog") { Step-FindingLog $accountName }
+            elseif ($session.State -eq "Tiling")     { Step-Tiling $accountName }
+        }
+        catch
+        {
+            Register-LaunchFailure $accountName $_.Exception.Message
+        }
+    }
+
+    if (($script:tickCount % $slowTicksPerCheck) -eq 0)
+    {
+        try
+        {
+            Invoke-SlowChecks
+        }
+        catch
+        {
+            Write-Log "WARNING: tick failed: $($_.Exception.Message)"
+        }
+    }
+
+    if (($script:tickCount % $uiTicksPerRefresh) -eq 0)
+    {
+        try
+        {
+            Update-StatusUi
+        }
+        catch
+        {
+            # never let a redraw problem take the watchdog down
+        }
+    }
+}
+
+$tickTimer = New-Object System.Windows.Forms.Timer
+$tickTimer.Interval = $tickMilliseconds
+$tickTimer.Add_Tick({ Invoke-WatchdogTick })
+$tickTimer.Start()
+
+Update-StatusUi
+[System.Windows.Forms.Application]::Run($statusForm)
+
+$tickTimer.Stop()
+Write-Log "watchdog stopped"
