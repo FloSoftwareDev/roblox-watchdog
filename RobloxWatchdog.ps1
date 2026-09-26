@@ -112,9 +112,11 @@ trap
     {
         Write-Log "FATAL at line $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line.Trim())"
     }
-    Write-Host "ERROR: $_" -ForegroundColor Red
-    Write-Host "Closing in 15 seconds, the reason is in $logFilePath" -ForegroundColor Yellow
-    Start-Sleep -Seconds 15
+    # A window app has no console to print to, so say it in a box and point at the log
+    [System.Windows.Forms.MessageBox]::Show(
+        "$_`r`n`r`nThe watchdog has stopped. The details are in:`r`n$logFilePath",
+        "Roblox Watchdog stopped", [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
     exit 1
 }
 
@@ -139,7 +141,10 @@ function Unprotect-Secret($protectedText)
     }
     catch
     {
-        Write-Host "WARNING: the saved password could not be decrypted, please type it again" -ForegroundColor Yellow
+        [System.Windows.Forms.MessageBox]::Show(
+            "The saved RAM password could not be decrypted, so please type it again.",
+            "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
         return ""
     }
 }
