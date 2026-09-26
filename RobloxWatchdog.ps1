@@ -922,20 +922,8 @@ function Step-FindingLog($accountName)
         $session.EverStarted = $true
         Write-Log "$accountName running as PID $($session.ProcessId), log $(Split-Path -Leaf $session.LogPath)"
 
-        # Each waiting account gets its own turn rather than all of them being pushed to
-        # the same moment: launches happen one at a time, so giving them all the same
-        # timer made every countdown read the same and be wrong for all but the next.
-        # Walks $allAccounts rather than $sessions.Values, which has no order.
-        $queuePosition = 0
-        foreach ($otherAccount in $allAccounts)
-        {
-            $otherSession = $sessions[$otherAccount]
-            if ($otherSession.State -eq "Idle" -and -not $otherSession.Paused)
-            {
-                $queuePosition++
-                $otherSession.RelaunchAfter = (Get-Date).AddSeconds($relaunchDelaySeconds * $queuePosition)
-            }
-        }
+        # The next one waits a full delay before starting, then the rest queue up behind it
+        Update-LaunchQueue $relaunchDelaySeconds
 
         Set-SessionState $session "Tiling"
         return
@@ -1058,6 +1046,24 @@ function Set-SessionState($session, $state)
 {
     $session.State = $state
     $session.StateSince = Get-Date
+}
+
+function Update-LaunchQueue($firstDelaySeconds)
+{
+    # Launches happen one at a time, so each waiting account is given its own turn:
+    # pushing them all to the same moment made every countdown read the same and be
+    # wrong for all but the next in line. Walks $allAccounts rather than
+    # $sessions.Values, which has no order.
+    $queuePosition = 0
+    foreach ($accountName in $allAccounts)
+    {
+        $session = $sessions[$accountName]
+        if ($session.State -eq "Idle" -and -not $session.Paused)
+        {
+            $session.RelaunchAfter = (Get-Date).AddSeconds($firstDelaySeconds + ($relaunchDelaySeconds * $queuePosition))
+            $queuePosition++
+        }
+    }
 }
 
 function Stop-Session($accountName, $reason)
@@ -1294,7 +1300,7 @@ $accountList.View = "Details"
 $accountList.FullRowSelect = $true
 $accountList.GridLines = $false
 $accountList.HeaderStyle = "None"
-$accountList.MultiSelect = $false
+$accountList.MultiSelect = $true                                                      # relaunching or pausing a few at once is the normal case
 $accountList.BorderStyle = "None"
 $accountList.BackColor = $themeSurface
 $accountList.ForeColor = $themeText
@@ -1431,31 +1437,57 @@ $pauseButton.Add_Click({
 })
 
 $relaunchButton.Add_Click({
-    if ($accountList.SelectedItems.Count -eq 0) { return }
-    $accountName = $accountList.SelectedItems[0].Tag
-    $session = $sessions[$accountName]
-    if ($session.State -ne "Idle")
+    $selected = @($accountList.SelectedItems | ForEach-Object { $_.Tag })
+    if ($selected.Count -eq 0) { return }
+
+    # Asked for by hand, so these go to the front: the first straight away and the rest
+    # behind it. Everyone else's place in the queue is left alone.
+    $queuePosition = 0
+    foreach ($accountName in $selected)
     {
-        Stop-Session $accountName "relaunch asked for from the window"
+        $session = $sessions[$accountName]
+        if ($session.State -ne "Idle")
+        {
+            Stop-Session $accountName "relaunch asked for from the window"
+        }
+        $session.FailureCount = 0
+        $session.Paused = $false
+        $session.RelaunchAfter = (Get-Date).AddSeconds($relaunchDelaySeconds * $queuePosition)
+        $queuePosition++
     }
-    $session.FailureCount = 0
-    $session.RelaunchAfter = Get-Date
-    $session.Paused = $false
 })
 
 $pauseAccountButton.Add_Click({
-    if ($accountList.SelectedItems.Count -eq 0) { return }
-    $accountName = $accountList.SelectedItems[0].Tag
-    $session = $sessions[$accountName]
-    $session.Paused = -not $session.Paused
-    if ($session.Paused)
+    $selected = @($accountList.SelectedItems | ForEach-Object { $_.Tag })
+    if ($selected.Count -eq 0) { return }
+
+    # A mixed selection would make the button ambiguous, so one running account means
+    # pause the lot, and only an all-paused selection resumes
+    $shouldPause = $false
+    foreach ($accountName in $selected)
     {
-        Write-Log "$accountName paused from the window, it will not be relaunched or poked"
+        if (-not $sessions[$accountName].Paused) { $shouldPause = $true; break }
     }
-    else
+
+    $queuePosition = 0
+    foreach ($accountName in $selected)
     {
-        $session.RelaunchAfter = Get-Date
-        Write-Log "$accountName resumed from the window"
+        $session = $sessions[$accountName]
+        if ($shouldPause)
+        {
+            if (-not $session.Paused)
+            {
+                $session.Paused = $true
+                Write-Log "$accountName paused from the window, it will not be relaunched or poked"
+            }
+        }
+        else
+        {
+            $session.Paused = $false
+            $session.RelaunchAfter = (Get-Date).AddSeconds($relaunchDelaySeconds * $queuePosition)
+            $queuePosition++
+            Write-Log "$accountName resumed from the window"
+        }
     }
 })
 
@@ -1597,19 +1629,27 @@ function Update-StatusUi
         $tileLastDrop.Text = "none yet"
     }
 
-    $hasSelection = $accountList.SelectedItems.Count -gt 0
-    $relaunchButton.Enabled = $hasSelection
-    $pauseAccountButton.Enabled = $hasSelection
-    if ($hasSelection)
+    $selectedCount = $accountList.SelectedItems.Count
+    $relaunchButton.Enabled = $selectedCount -gt 0
+    $pauseAccountButton.Enabled = $selectedCount -gt 0
+    if ($selectedCount -gt 0)
     {
-        if ($sessions[$accountList.SelectedItems[0].Tag].Paused)
+        # The count only earns its place once there is more than one
+        $what = if ($selectedCount -gt 1) { "$selectedCount selected" } else { "selected" }
+        $relaunchButton.Text = "Relaunch $what"
+
+        # Matches what the click will do: any running account means the button pauses
+        $anyRunning = $false
+        foreach ($selectedItem in $accountList.SelectedItems)
         {
-            $pauseAccountButton.Text = "Resume selected"
+            if (-not $sessions[$selectedItem.Tag].Paused) { $anyRunning = $true; break }
         }
-        else
-        {
-            $pauseAccountButton.Text = "Pause selected"
-        }
+        $pauseAccountButton.Text = if ($anyRunning) { "Pause $what" } else { "Resume $what" }
+    }
+    else
+    {
+        $relaunchButton.Text = "Relaunch selected"
+        $pauseAccountButton.Text = "Pause selected"
     }
 
     if ($script:logBox -and -not $script:logBox.IsDisposed)
