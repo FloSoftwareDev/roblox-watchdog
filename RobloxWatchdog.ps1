@@ -787,8 +787,14 @@ function Step-Launching($accountName)
         }
     }
 
+    # Claimed ids are read fresh, not from the snapshot taken at launch: if two launches
+    # ever overlap, a snapshot would let both sessions claim the same process and then
+    # tile it into both their slots
+    $claimedIds = @($sessions.Values | ForEach-Object { $_.ProcessId } | Where-Object { $_ -ne 0 })
     $newClient = Get-Process $processName -ErrorAction SilentlyContinue |
-        Where-Object { $session.LaunchTrackedIds -notcontains $_.Id -and $_.MainWindowHandle -ne 0 } |
+        Where-Object { $session.LaunchTrackedIds -notcontains $_.Id -and
+                       $claimedIds -notcontains $_.Id -and
+                       $_.MainWindowHandle -ne 0 } |
         Sort-Object StartTime |
         Select-Object -First 1
 
@@ -1532,6 +1538,20 @@ function Invoke-SlowChecks
     # gets poked per pass; several at once would visibly freeze the window
     $antiIdleSentThisPass = $false
 
+    # One launch at a time. The old blocking design serialised launches by accident;
+    # stepping through them does not, and launching several at once means the "which
+    # process just appeared" check cannot tell them apart.
+    $launchInFlight = $false
+    foreach ($otherSession in $sessions.Values)
+    {
+        if ($otherSession.State -eq "Launching" -or $otherSession.State -eq "FindingLog" -or
+            $otherSession.State -eq "Tiling")
+        {
+            $launchInFlight = $true
+            break
+        }
+    }
+
     foreach ($accountName in $allAccounts)
     {
         $session = $sessions[$accountName]
@@ -1540,8 +1560,10 @@ function Invoke-SlowChecks
         {
             if ($session.State -eq "Idle")
             {
-                if (-not $script:globalPaused -and (Get-Date) -ge $session.RelaunchAfter)
+                if (-not $script:globalPaused -and -not $launchInFlight -and
+                    (Get-Date) -ge $session.RelaunchAfter)
                 {
+                    $launchInFlight = $true                                           # the rest wait their turn
                     try
                     {
                         Request-Launch $accountName
@@ -1549,6 +1571,7 @@ function Invoke-SlowChecks
                     catch
                     {
                         Register-LaunchFailure $accountName $_.Exception.Message
+                        $launchInFlight = $false                                      # nothing actually started
                     }
                 }
             }
