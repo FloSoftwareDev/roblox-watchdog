@@ -120,6 +120,86 @@ trap
     exit 1
 }
 
+# ---- Theme --------------------------------------------------------------------------
+
+# Flat dark. No gradients anywhere: one background, one raised surface, one hairline
+# border, two text weights, and colour used only where it carries meaning (the accent
+# for the thing you are meant to read first, green/amber/grey for account state).
+$themeBackground = [System.Drawing.Color]::FromArgb(27, 27, 31)
+$themeSurface    = [System.Drawing.Color]::FromArgb(35, 35, 41)
+$themeBorder     = [System.Drawing.Color]::FromArgb(52, 52, 61)
+$themeText       = [System.Drawing.Color]::FromArgb(232, 232, 236)
+$themeMuted      = [System.Drawing.Color]::FromArgb(138, 138, 149)
+$themeAccent     = [System.Drawing.Color]::FromArgb(88, 159, 214)
+$themeGreen      = [System.Drawing.Color]::FromArgb(76, 195, 138)
+$themeAmber      = [System.Drawing.Color]::FromArgb(224, 164, 88)
+$themeGrey       = [System.Drawing.Color]::FromArgb(110, 110, 122)
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class DarkFrame
+{
+    [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+}
+"@
+
+function Set-DarkTitleBar($form)
+{
+    # Without this the title bar stays light and the window looks half-themed. 20 is
+    # DWMWA_USE_IMMERSIVE_DARK_MODE on Windows 10 2004 and later, 19 on the builds
+    # before it; both are ignored harmlessly on anything older.
+    try
+    {
+        $enabled = 1
+        if ([DarkFrame]::DwmSetWindowAttribute($form.Handle, 20, [ref]$enabled, 4) -ne 0)
+        {
+            [void][DarkFrame]::DwmSetWindowAttribute($form.Handle, 19, [ref]$enabled, 4)
+        }
+    }
+    catch
+    {
+        # an unthemed title bar is not worth failing over
+    }
+}
+
+function Set-ThemedForm($form)
+{
+    $form.BackColor = $themeBackground
+    $form.ForeColor = $themeText
+    $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $form.Add_Shown({ Set-DarkTitleBar $args[0] })
+}
+
+function Set-ThemedButton($button, $isPrimary)
+{
+    $button.FlatStyle = "Flat"
+    $button.UseVisualStyleBackColor = $false
+    $button.FlatAppearance.BorderSize = 1
+    $button.Cursor = "Hand"
+    if ($isPrimary)
+    {
+        $button.BackColor = $themeAccent
+        $button.ForeColor = [System.Drawing.Color]::FromArgb(16, 20, 26)
+        $button.FlatAppearance.BorderColor = $themeAccent
+        $button.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(116, 178, 224)
+    }
+    else
+    {
+        $button.BackColor = $themeSurface
+        $button.ForeColor = $themeText
+        $button.FlatAppearance.BorderColor = $themeBorder
+        $button.FlatAppearance.MouseOverBackColor = $themeBorder
+    }
+}
+
+function Set-ThemedInput($control)
+{
+    $control.BackColor = $themeSurface
+    $control.ForeColor = $themeText
+    $control.BorderStyle = "FixedSingle"
+}
+
 # ---- Settings window ---------------------------------------------------------------
 
 function Protect-Secret($plainText)
@@ -245,6 +325,7 @@ function Show-SettingsWindow($saved)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
+    Set-ThemedForm $form
 
     $inputs = @{}
     $rowTop = 15
@@ -262,11 +343,13 @@ function Show-SettingsWindow($saved)
         $label.Size = New-Object System.Drawing.Size(225, 20)
         # centred against the field, and top-aligned next to a multiline box
         $label.TextAlign = if ($height -gt 20) { "TopLeft" } else { "MiddleLeft" }
+        $label.ForeColor = $themeMuted
         $form.Controls.Add($label)
 
         $textBox = New-Object System.Windows.Forms.TextBox
         $textBox.Location = New-Object System.Drawing.Point(248, $rowTop)
         $textBox.Size = New-Object System.Drawing.Size(320, $height)
+        Set-ThemedInput $textBox
         $textBox.Text = $saved[$key]
         if ($height -gt 20)
         {
@@ -304,6 +387,8 @@ function Show-SettingsWindow($saved)
     $closeOthersBox.Location = New-Object System.Drawing.Point(248, $rowTop)
     $closeOthersBox.Size = New-Object System.Drawing.Size(320, 20)
     $closeOthersBox.Checked = ($saved["CloseOtherClients"] -ne "False")
+    $closeOthersBox.FlatStyle = "Flat"                                                # so the box itself follows the dark background
+    $closeOthersBox.ForeColor = $themeText
     $form.Controls.Add($closeOthersBox)
     $rowTop += 26
 
@@ -312,6 +397,8 @@ function Show-SettingsWindow($saved)
     $allMonitorsBox.Location = New-Object System.Drawing.Point(248, $rowTop)
     $allMonitorsBox.Size = New-Object System.Drawing.Size(320, 20)
     $allMonitorsBox.Checked = ($saved["UseAllMonitors"] -ne "False")
+    $allMonitorsBox.FlatStyle = "Flat"
+    $allMonitorsBox.ForeColor = $themeText
     $form.Controls.Add($allMonitorsBox)
     $rowTop += 30
 
@@ -319,6 +406,7 @@ function Show-SettingsWindow($saved)
     $note.Text = "A running client is adopted as main; otherwise main is launched."
     $note.Location = New-Object System.Drawing.Point(15, $rowTop)
     $note.Size = New-Object System.Drawing.Size(553, 20)
+    $note.ForeColor = $themeMuted
     $form.Controls.Add($note)
 
     $startButton = New-Object System.Windows.Forms.Button
@@ -326,6 +414,7 @@ function Show-SettingsWindow($saved)
     $startButton.Location = New-Object System.Drawing.Point(468, ($rowTop + 30))
     $startButton.Size = New-Object System.Drawing.Size(100, 30)
     $startButton.DialogResult = "OK"
+    Set-ThemedButton $startButton $true
     $form.Controls.Add($startButton)
     $form.AcceptButton = $startButton
 
@@ -1033,10 +1122,10 @@ function Get-SessionStatusText($accountName)
 function Get-SessionColor($accountName)
 {
     $session = $sessions[$accountName]
-    if ($session.Paused) { return [System.Drawing.Color]::FromArgb(150, 150, 150) }
-    if ($session.State -eq "Running" -and $session.JoinedAt) { return [System.Drawing.Color]::FromArgb(30, 150, 60) }
-    if ($session.State -eq "Idle") { return [System.Drawing.Color]::FromArgb(150, 150, 150) }
-    return [System.Drawing.Color]::FromArgb(220, 140, 0)
+    if ($session.Paused) { return $themeGrey }
+    if ($session.State -eq "Running" -and $session.JoinedAt) { return $themeGreen }
+    if ($session.State -eq "Idle") { return $themeGrey }
+    return $themeAmber                                                                # mid-launch
 }
 
 # ---- State ------------------------------------------------------------------------
@@ -1116,16 +1205,13 @@ if ($closeOtherClients)
 
 # ---- Status window ----------------------------------------------------------------
 
-$greyText = [System.Drawing.Color]::FromArgb(110, 110, 110)
-
 $statusForm = New-Object System.Windows.Forms.Form
 $statusForm.Text = "Roblox Watchdog"
 $statusForm.Size = New-Object System.Drawing.Size(580, 600)
 $statusForm.StartPosition = "CenterScreen"
 $statusForm.FormBorderStyle = "FixedSingle"
 $statusForm.MaximizeBox = $false
-$statusForm.BackColor = [System.Drawing.Color]::White
-$statusForm.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+Set-ThemedForm $statusForm
 
 # Always present rather than shown only on trouble, so the layout never shifts and the
 # answer to "is this elevated" is on screen instead of buried in the log
@@ -1136,23 +1222,24 @@ $elevationStrip.TextAlign = "MiddleLeft"
 $elevationStrip.Padding = New-Object System.Windows.Forms.Padding(14, 0, 14, 0)
 if ($isElevated)
 {
-    $elevationStrip.Text = "Running as administrator."
-    $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(230, 245, 233)
-    $elevationStrip.ForeColor = [System.Drawing.Color]::FromArgb(25, 110, 50)
+    $elevationStrip.Text = "Running as administrator"
+    $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(24, 40, 32)
+    $elevationStrip.ForeColor = $themeGreen
 }
 else
 {
     $elevationStrip.Text = "Not running as administrator. If Account Manager is elevated, tiling, anti-idle and closing strays will be denied."
-    $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(255, 244, 205)
-    $elevationStrip.ForeColor = [System.Drawing.Color]::FromArgb(130, 80, 0)
+    $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(45, 36, 20)
+    $elevationStrip.ForeColor = $themeAmber
 }
 $statusForm.Controls.Add($elevationStrip)
 
 $headline = New-Object System.Windows.Forms.Label
 $headline.Location = New-Object System.Drawing.Point(14, 58)
 $headline.Size = New-Object System.Drawing.Size(536, 40)
-$headline.Font = New-Object System.Drawing.Font("Segoe UI", 19)
+$headline.Font = New-Object System.Drawing.Font("Segoe UI Light", 22)
 $headline.TextAlign = "MiddleCenter"
+$headline.ForeColor = $themeText
 $headline.Text = "starting"
 $statusForm.Controls.Add($headline)
 
@@ -1161,7 +1248,7 @@ function New-Tile($caption, $x, $y)
     $captionLabel = New-Object System.Windows.Forms.Label
     $captionLabel.Location = New-Object System.Drawing.Point($x, $y)
     $captionLabel.Size = New-Object System.Drawing.Size(250, 16)
-    $captionLabel.ForeColor = $greyText
+    $captionLabel.ForeColor = $themeMuted
     $captionLabel.Text = $caption
     $statusForm.Controls.Add($captionLabel)
 
@@ -1169,6 +1256,7 @@ function New-Tile($caption, $x, $y)
     $valueLabel.Location = New-Object System.Drawing.Point($x, ($y + 17))
     $valueLabel.Size = New-Object System.Drawing.Size(250, 25)
     $valueLabel.Font = New-Object System.Drawing.Font("Segoe UI", 12)
+    $valueLabel.ForeColor = $themeAccent
     $valueLabel.Text = "-"
     $statusForm.Controls.Add($valueLabel)
     return $valueLabel
@@ -1179,14 +1267,37 @@ $tileStrays   = New-Tile "strays closed"   300 108
 $tileUptime   = New-Tile "watchdog uptime" 28 156
 $tileLastDrop = New-Tile "last disconnect" 300 156
 
+$divider = New-Object System.Windows.Forms.Panel
+$divider.Location = New-Object System.Drawing.Point(14, 198)
+$divider.Size = New-Object System.Drawing.Size(536, 1)
+$divider.BackColor = $themeBorder
+$statusForm.Controls.Add($divider)
+
+# The real ListView header cannot be themed and would sit there light grey on a dark
+# list, so it is switched off and these labels stand in for it, lined up with the
+# column widths below
+$headerOffsets = @{ Account = 42; Status = 210; Memory = 366; Up = 444 }
+foreach ($headerName in @("Account", "Status", "Memory", "Up"))
+{
+    $headerLabel = New-Object System.Windows.Forms.Label
+    $headerLabel.Text = $headerName
+    $headerLabel.Location = New-Object System.Drawing.Point($headerOffsets[$headerName], 208)
+    $headerLabel.Size = New-Object System.Drawing.Size(120, 16)
+    $headerLabel.ForeColor = $themeMuted
+    $statusForm.Controls.Add($headerLabel)
+}
+
 $accountList = New-Object System.Windows.Forms.ListView
-$accountList.Location = New-Object System.Drawing.Point(14, 208)
-$accountList.Size = New-Object System.Drawing.Size(536, 206)
+$accountList.Location = New-Object System.Drawing.Point(14, 228)
+$accountList.Size = New-Object System.Drawing.Size(536, 186)
 $accountList.View = "Details"
 $accountList.FullRowSelect = $true
 $accountList.GridLines = $false
-$accountList.HeaderStyle = "Nonclickable"
+$accountList.HeaderStyle = "None"
 $accountList.MultiSelect = $false
+$accountList.BorderStyle = "None"
+$accountList.BackColor = $themeSurface
+$accountList.ForeColor = $themeText
 $accountList.Columns.Add("", 28) | Out-Null
 $accountList.Columns.Add("Account", 168) | Out-Null
 $accountList.Columns.Add("Status", 156) | Out-Null
@@ -1210,6 +1321,7 @@ $relaunchButton.Text = "Relaunch selected"
 $relaunchButton.Location = New-Object System.Drawing.Point(14, 424)
 $relaunchButton.Size = New-Object System.Drawing.Size(140, 27)
 $relaunchButton.Enabled = $false
+Set-ThemedButton $relaunchButton $false
 $statusForm.Controls.Add($relaunchButton)
 
 $pauseAccountButton = New-Object System.Windows.Forms.Button
@@ -1217,36 +1329,41 @@ $pauseAccountButton.Text = "Pause selected"
 $pauseAccountButton.Location = New-Object System.Drawing.Point(162, 424)
 $pauseAccountButton.Size = New-Object System.Drawing.Size(140, 27)
 $pauseAccountButton.Enabled = $false
+Set-ThemedButton $pauseAccountButton $false
 $statusForm.Controls.Add($pauseAccountButton)
 
 $settingsButton = New-Object System.Windows.Forms.Button
 $settingsButton.Text = "Settings"
 $settingsButton.Location = New-Object System.Drawing.Point(14, 468)
 $settingsButton.Size = New-Object System.Drawing.Size(100, 30)
+Set-ThemedButton $settingsButton $false
 $statusForm.Controls.Add($settingsButton)
 
 $pauseButton = New-Object System.Windows.Forms.Button
 $pauseButton.Text = "Pause"
 $pauseButton.Location = New-Object System.Drawing.Point(122, 468)
 $pauseButton.Size = New-Object System.Drawing.Size(100, 30)
+Set-ThemedButton $pauseButton $false
 $statusForm.Controls.Add($pauseButton)
 
 $logButton = New-Object System.Windows.Forms.Button
 $logButton.Text = "Log"
 $logButton.Location = New-Object System.Drawing.Point(230, 468)
 $logButton.Size = New-Object System.Drawing.Size(100, 30)
+Set-ThemedButton $logButton $false
 $statusForm.Controls.Add($logButton)
 
 $exitButton = New-Object System.Windows.Forms.Button
 $exitButton.Text = "Exit"
 $exitButton.Location = New-Object System.Drawing.Point(450, 468)
 $exitButton.Size = New-Object System.Drawing.Size(100, 30)
+Set-ThemedButton $exitButton $false
 $statusForm.Controls.Add($exitButton)
 
 $hintLabel = New-Object System.Windows.Forms.Label
 $hintLabel.Location = New-Object System.Drawing.Point(14, 508)
 $hintLabel.Size = New-Object System.Drawing.Size(536, 18)
-$hintLabel.ForeColor = $greyText
+$hintLabel.ForeColor = $themeMuted
 $hintLabel.Text = "Closing this window keeps the watchdog running in the tray. Use Exit to stop it."
 $statusForm.Controls.Add($hintLabel)
 
@@ -1352,7 +1469,7 @@ $logButton.Add_Click({
     $form.Text = "Roblox Watchdog - log"
     $form.Size = New-Object System.Drawing.Size(940, 520)
     $form.StartPosition = "CenterParent"
-    $form.BackColor = [System.Drawing.Color]::White
+    Set-ThemedForm $form
 
     $box = New-Object System.Windows.Forms.TextBox
     $box.Multiline = $true
@@ -1360,7 +1477,8 @@ $logButton.Add_Click({
     $box.ScrollBars = "Both"
     $box.WordWrap = $false
     $box.Dock = "Fill"
-    $box.BackColor = [System.Drawing.Color]::White
+    $box.BackColor = $themeBackground
+    $box.ForeColor = $themeText
     $box.BorderStyle = "None"
     $box.Font = New-Object System.Drawing.Font("Consolas", 9)
     $form.Controls.Add($box)
@@ -1422,13 +1540,21 @@ function Update-StatusUi
         $accountName = $item.Tag
         $session = $sessions[$accountName]
 
+        $stateColor = Get-SessionColor $accountName
         $item.Text = "  " + [char]0x25CF
-        $item.ForeColor = Get-SessionColor $accountName
+        $item.ForeColor = $stateColor
 
         $label = $accountName
         if ($accountName -eq $mainAccount) { $label += "   (main)" }
         $item.SubItems[1].Text = $label
         $item.SubItems[2].Text = Get-SessionStatusText $accountName
+
+        # Subitems keep their own colours (UseItemStyleForSubItems is off), and on a dark
+        # background they default to black, so every one has to be set
+        $item.SubItems[1].ForeColor = $themeText
+        $item.SubItems[2].ForeColor = $stateColor
+        $item.SubItems[3].ForeColor = $themeMuted
+        $item.SubItems[4].ForeColor = $themeMuted
 
         $process = Get-SessionProcess $session
         if ($process)
