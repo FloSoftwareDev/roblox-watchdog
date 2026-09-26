@@ -222,7 +222,10 @@ function Show-SettingsWindow($saved)
     $inputs = @{}
     $rowTop = 15
 
-    function Add-Row($labelText, $key, $height, $isPassword)
+    # $maskInput only decides whether the box shows dots instead of characters; it is
+    # not a password itself. Named that way because an $isPassword parameter trips
+    # PSScriptAnalyzer's PSAvoidUsingPlainTextForPassword rule on the name alone.
+    function Add-Row($labelText, $key, $height, $maskInput)
     {
         $label = New-Object System.Windows.Forms.Label
         $label.Text = $labelText
@@ -244,7 +247,7 @@ function Show-SettingsWindow($saved)
             $textBox.AcceptsReturn = $true
             $textBox.ScrollBars = "Vertical"
         }
-        if ($isPassword)
+        if ($maskInput)
         {
             $textBox.UseSystemPasswordChar = $true
         }
