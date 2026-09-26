@@ -830,14 +830,21 @@ function Step-FindingLog($accountName)
         $session.JoinedAt = $null                                                     # not in the game until the log says so
         $session.LastInputAt = Get-Date                                               # joining counts as input
         $session.WindowSeenAt = $null
+        $session.EverStarted = $true
         Write-Log "$accountName running as PID $($session.ProcessId), log $(Split-Path -Leaf $session.LogPath)"
 
-        # Staggers the next launch so accounts don't join at the same second
-        foreach ($otherSession in $sessions.Values)
+        # Each waiting account gets its own turn rather than all of them being pushed to
+        # the same moment: launches happen one at a time, so giving them all the same
+        # timer made every countdown read the same and be wrong for all but the next.
+        # Walks $allAccounts rather than $sessions.Values, which has no order.
+        $queuePosition = 0
+        foreach ($otherAccount in $allAccounts)
         {
-            if ($otherSession.State -eq "Idle")
+            $otherSession = $sessions[$otherAccount]
+            if ($otherSession.State -eq "Idle" -and -not $otherSession.Paused)
             {
-                $otherSession.RelaunchAfter = (Get-Date).AddSeconds($relaunchDelaySeconds)
+                $queuePosition++
+                $otherSession.RelaunchAfter = (Get-Date).AddSeconds($relaunchDelaySeconds * $queuePosition)
             }
         }
 
@@ -1007,8 +1014,10 @@ function Get-SessionStatusText($accountName)
     if ($session.State -eq "Idle")
     {
         $waitSeconds = [int](($session.RelaunchAfter - (Get-Date)).TotalSeconds)
-        if ($waitSeconds -gt 0) { return "relaunching in $waitSeconds s" }
-        return "waiting"
+        # "relaunching" is only true once it has actually been up
+        $verb = if ($session.EverStarted) { "relaunching" } else { "launching" }
+        if ($waitSeconds -gt 0) { return "$verb in $waitSeconds s" }
+        return "queued"                                                               # its turn has come, waiting for the one in flight
     }
     if ($session.State -eq "Launching")  { return "launching" }
     if ($session.State -eq "FindingLog") { return "finding log" }
@@ -1042,7 +1051,8 @@ foreach ($accountName in $allAccounts)
                                  LastInputAt = $null; JoinedAt = $null
                                  State = "Idle"; StateSince = (Get-Date)
                                  LaunchTrackedIds = @(); LaunchedAt = $null; InstallerKilled = $false
-                                 LaunchUrl = $null; WindowSeenAt = $null; Paused = $false }
+                                 LaunchUrl = $null; WindowSeenAt = $null; Paused = $false
+                                 EverStarted = $false }
 }
 
 $globalPaused = $false
@@ -1078,6 +1088,7 @@ if ($runningMain)
     $sessions[$mainAccount].StartedAt = $runningMain.StartTime
     $sessions[$mainAccount].LastInputAt = Get-Date                                    # unknown when it last had input, so start the clock now
     $sessions[$mainAccount].JoinedAt = Get-Date                                       # it was already playing, so don't hold it to the join timeout
+    $sessions[$mainAccount].EverStarted = $true                                       # it is already up, so a stop is a relaunch
     Set-SessionState $sessions[$mainAccount] "Running"
     try
     {
