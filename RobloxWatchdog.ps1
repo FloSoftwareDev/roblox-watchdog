@@ -45,6 +45,7 @@ $launchTimeoutSeconds = 90                                                      
 $logTimeoutSeconds = 30                                                              # no log file by then = failed launch
 $windowTimeoutSeconds = 60                                                           # no window by then = leave it untiled
 $windowSettleSeconds = 5                                                             # let Roblox restore its own size before moving it
+$manualMoveThreshold = 60                                                            # further than Roblox's own nudging, so only a real drag counts
 $maximumLaunchFailures = 5                                                           # log loudly after this many failed launches in a row
 $logFolder = Join-Path $env:LOCALAPPDATA "Roblox\logs"                              # Roblox client log files
 $disconnectPattern = "Sending disconnect with reason: (\d+)"                         # logged on drop (277) and leave (285)
@@ -66,6 +67,18 @@ $settingsFolder = Join-Path $env:LOCALAPPDATA "RobloxWatchdog"
 $settingsPath = Join-Path $settingsFolder "RobloxWatchdog.json"
 $legacySettingsPath = Join-Path $scriptFolder "RobloxWatchdog.json"                  # pre-003 location, migrated on first run
 $logFilePath = Join-Path $settingsFolder "RobloxWatchdog.log"
+$positionsPath = Join-Path $settingsFolder "WindowPositions.json"                    # where you dragged each account's window
+$restartsPath = Join-Path $settingsFolder "AutoRestarts.txt"                         # timestamps, for the crash-loop guard
+
+# Relaunching itself after a crash is only safe with a limit: a fault that happens
+# every time on startup would otherwise respawn for ever
+$maximumAutoRestarts = 3
+$autoRestartWindowMinutes = 10
+
+# -autostart means this instance was started by the previous one after a crash, so it
+# skips the settings dialog and uses what was saved
+$startupArguments = @([Environment]::GetCommandLineArgs() | Select-Object -Skip 1)
+$autoStarted = $startupArguments -contains "-autostart"
 
 $recentLogLines = New-Object System.Collections.Generic.List[string]                  # what the Log window shows
 
@@ -150,6 +163,58 @@ function Complete-PendingWebhooks
     }
 }
 
+function Request-SelfRestart
+{
+    # Reached only from the trap, so only after a fault. Pressing Exit does not come
+    # through here, which is the point: a crash should come back, a deliberate stop
+    # should stay stopped.
+    $exePath = [Environment]::GetCommandLineArgs()[0]
+    if ($exePath -notlike "*.exe")
+    {
+        Write-Log "not restarting automatically: running as a script, not the exe"
+        return $false
+    }
+
+    $recentRestarts = @()
+    try
+    {
+        if (Test-Path $restartsPath)
+        {
+            $cutoff = (Get-Date).AddMinutes(-$autoRestartWindowMinutes)
+            $recentRestarts = @(Get-Content $restartsPath |
+                Where-Object { $_ } |
+                ForEach-Object { [datetime]::Parse($_, [Globalization.CultureInfo]::InvariantCulture) } |
+                Where-Object { $_ -gt $cutoff })
+        }
+    }
+    catch
+    {
+        $recentRestarts = @()
+    }
+
+    if ($recentRestarts.Count -ge $maximumAutoRestarts)
+    {
+        Write-Log "ERROR: not restarting again, there have already been $($recentRestarts.Count) in the last $autoRestartWindowMinutes min"
+        Send-DiscordAlert "Watchdog has given up" ("It has crashed and restarted $($recentRestarts.Count) times in " +
+            "$autoRestartWindowMinutes minutes, so it is staying down. The accounts are not being watched.") $alertRed
+        return $false
+    }
+
+    try
+    {
+        $recentRestarts += (Get-Date)
+        Set-Content -Path $restartsPath -Value @($recentRestarts | ForEach-Object { $_.ToString("o") }) -Encoding UTF8
+        Start-Process -FilePath $exePath -ArgumentList "-autostart"
+        Write-Log "restarting itself (attempt $($recentRestarts.Count) of $maximumAutoRestarts in this window)"
+        return $true
+    }
+    catch
+    {
+        Write-Log "ERROR: could not restart itself: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Write-ElevationHint
 {
     # Said once, not on every denial: the old version repeated the same failure every
@@ -172,16 +237,25 @@ trap
     {
         Write-Log "FATAL at line $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line.Trim())"
     }
+    $restarting = Request-SelfRestart
+
     # The whole point of the webhook: on 24-09 this died silently and the accounts sat
     # dead for 74 minutes before anyone noticed
-    Send-DiscordAlert "Watchdog stopped" "It hit an error and has closed:`n``$_``" $alertRed
+    $alertText = "It hit an error:`n``$_``"
+    if ($restarting) { $alertText += "`n`nIt is starting itself again." }
+    else { $alertText += "`n`nIt has closed and the accounts are not being watched." }
+    Send-DiscordAlert "Watchdog crashed" $alertText $alertRed
     Complete-PendingWebhooks                                                          # give the post a chance before the process goes
 
-    # A window app has no console to print to, so say it in a box and point at the log
-    [System.Windows.Forms.MessageBox]::Show(
-        "$_`r`n`r`nThe watchdog has stopped. The details are in:`r`n$logFilePath",
-        "Roblox Watchdog stopped", [System.Windows.Forms.MessageBoxButtons]::OK,
-        [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+    # No message box when it is coming straight back, or an unattended crash would leave
+    # a dialog sitting there waiting for a click that nobody is there to give
+    if (-not $restarting)
+    {
+        [System.Windows.Forms.MessageBox]::Show(
+            "$_`r`n`r`nThe watchdog has stopped. The details are in:`r`n$logFilePath",
+            "Roblox Watchdog stopped", [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+    }
     exit 1
 }
 
@@ -314,6 +388,7 @@ function Get-DefaultSettings
         UseAllMonitors         = "True"
         DiscordWebhookUrl      = ""
         DiscordSummaryMinutes  = "0"
+        RememberWindowPositions = "True"
     }
 }
 
@@ -529,6 +604,16 @@ function Show-SettingsWindow($saved)
     $allMonitorsBox.FlatStyle = "Flat"
     $allMonitorsBox.ForeColor = $themeText
     $form.Controls.Add($allMonitorsBox)
+    $rowTop += 26
+
+    $rememberPositionsBox = New-Object System.Windows.Forms.CheckBox
+    $rememberPositionsBox.Text = "Put windows back where I dragged them"
+    $rememberPositionsBox.Location = New-Object System.Drawing.Point(248, $rowTop)
+    $rememberPositionsBox.Size = New-Object System.Drawing.Size(320, 20)
+    $rememberPositionsBox.Checked = ($saved["RememberWindowPositions"] -ne "False")
+    $rememberPositionsBox.FlatStyle = "Flat"
+    $rememberPositionsBox.ForeColor = $themeText
+    $form.Controls.Add($rememberPositionsBox)
     $rowTop += 30
 
     $note = New-Object System.Windows.Forms.Label
@@ -562,6 +647,7 @@ function Show-SettingsWindow($saved)
     }
     $result["CloseOtherClients"] = [string]$closeOthersBox.Checked
     $result["UseAllMonitors"] = [string]$allMonitorsBox.Checked
+    $result["RememberWindowPositions"] = [string]$rememberPositionsBox.Checked
     return $result
 }
 
@@ -625,7 +711,23 @@ function Test-Settings($settings)
 
 # Reopen the window on a bad value instead of throwing away everything that was typed
 $settings = Get-SavedSettings
-while ($true)
+
+# Restarted after a crash: nobody is sitting there to press Start, so it goes straight
+# in on what was saved. If those settings are not usable it falls through to the dialog.
+if ($autoStarted)
+{
+    try
+    {
+        Test-Settings $settings
+        $skipSettingsDialog = $true
+    }
+    catch
+    {
+        $skipSettingsDialog = $false
+    }
+}
+
+while (-not $skipSettingsDialog)
 {
     $settings = Show-SettingsWindow $settings
     if (-not $settings) { exit 0 }                                                   # cancelled on the way in
@@ -661,6 +763,7 @@ $reapStrayMinutes = [int]$settings.ReapStrayMinutes
 $useAllMonitors = ($settings.UseAllMonitors -ne "False")
 $discordWebhookUrl = $settings.DiscordWebhookUrl
 $discordSummaryMinutes = [int]$settings.DiscordSummaryMinutes
+$rememberWindowPositions = ($settings.RememberWindowPositions -ne "False")
 $reportedStrays = @{}                                                                # windowed strays already mentioned, so the log is not spammed
 
 # ---- Watchdog ----------------------------------------------------------------------
@@ -749,6 +852,55 @@ function Get-TilingScreens
              Sort-Object @{ Expression = { -not $_.Primary } }, @{ Expression = { $_.Bounds.X } })
 }
 
+function Get-SavedWindowPositions
+{
+    $positions = @{}
+    if (-not $rememberWindowPositions) { return $positions }
+    try
+    {
+        if (Test-Path $positionsPath)
+        {
+            $json = Get-Content $positionsPath -Raw | ConvertFrom-Json
+            foreach ($property in $json.PSObject.Properties)
+            {
+                $positions[$property.Name] = [string]$property.Value
+            }
+        }
+    }
+    catch
+    {
+        Write-Log "WARNING: could not read the saved window positions: $($_.Exception.Message)"
+    }
+    return $positions
+}
+
+function Save-WindowPosition($accountName, $rectangleText)
+{
+    # Written as "x,y,width,height" per account, in its own file so the settings file
+    # stays a flat list of strings
+    if (-not $rememberWindowPositions) { return }
+    try
+    {
+        $positions = Get-SavedWindowPositions
+        if ($positions[$accountName] -eq $rectangleText) { return }                   # nothing new to write
+        $positions[$accountName] = $rectangleText
+        $positions | ConvertTo-Json | Set-Content $positionsPath -Encoding UTF8
+        Write-Log "remembered where $accountName was moved to ($rectangleText)"
+    }
+    catch
+    {
+        Write-Log "WARNING: could not save the window position for $accountName : $($_.Exception.Message)"
+    }
+}
+
+function Get-WindowRectangle($handle)
+{
+    $rect = New-Object RECT
+    if (-not [WinPos]::GetWindowRect($handle, [ref]$rect)) { return $null }
+    return [pscustomobject]@{ X = $rect.Left; Y = $rect.Top
+                              Width = ($rect.Right - $rect.Left); Height = ($rect.Bottom - $rect.Top) }
+}
+
 function Get-SlotRectangle($slotIndex)
 {
     # Accounts are shared out between the screens in proportion to their area, then
@@ -804,7 +956,7 @@ function Get-SlotRectangle($slotIndex)
                               ScreenNumber = 1; ScreenCount = $screens.Count }
 }
 
-function Set-ClientWindow($processId, $slotIndex)
+function Set-ClientWindow($accountName, $processId)
 {
     # Nothing here waits: the Tiling state does the waiting, one step per tick, so the
     # status window stays responsive instead of freezing for a minute per launch
@@ -813,11 +965,27 @@ function Set-ClientWindow($processId, $slotIndex)
     $process.Refresh()
     if ($process.MainWindowHandle -eq [IntPtr]::Zero) { return $false }
 
+    $slotIndex = [array]::IndexOf($allAccounts, $accountName)
+
+    # Where you dragged it to wins over the computed grid
     $slot = Get-SlotRectangle $slotIndex
     $x = $slot.X
     $y = $slot.Y
     $tileWidth = $slot.Width
     $tileHeight = $slot.Height
+    $fromMemory = $false
+
+    $savedPositions = Get-SavedWindowPositions
+    if ($savedPositions.ContainsKey($accountName))
+    {
+        $parts = $savedPositions[$accountName] -split ','
+        if ($parts.Count -eq 4)
+        {
+            $x = [int]$parts[0]; $y = [int]$parts[1]
+            $tileWidth = [int]$parts[2]; $tileHeight = [int]$parts[3]
+            $fromMemory = $true
+        }
+    }
 
     [Win32.Window]::ShowWindow($process.MainWindowHandle, 9) | Out-Null   # SW_RESTORE, MoveWindow ignores maximized windows
     $moved = [Win32.Window]::MoveWindow($process.MainWindowHandle, $x, $y, $tileWidth, $tileHeight, $true)
@@ -833,12 +1001,17 @@ function Set-ClientWindow($processId, $slotIndex)
 
     if ($moved -and $readBack -and $offBy -le 40)
     {
-        $where = if ($slot.ScreenCount -gt 1) { " on screen $($slot.ScreenNumber)" } else { "" }
-        Write-Log "moved PID $processId to slot $slotIndex$where ($x,$y $($tileWidth)x$($tileHeight))"
+        # Remembered so a later manual drag can be told apart from where we put it
+        $sessions[$accountName].AppliedRect = "$x,$y,$tileWidth,$tileHeight"
+        $where = if ($fromMemory) { "where you left it" } else
+        {
+            "slot $slotIndex" + $(if ($slot.ScreenCount -gt 1) { " on screen $($slot.ScreenNumber)" } else { "" })
+        }
+        Write-Log "moved $accountName (PID $processId) to $where ($x,$y $($tileWidth)x$($tileHeight))"
         return $true
     }
 
-    Write-Log "WARNING: PID $processId did not move to slot $slotIndex (asked for $x,$y, it sits at $($rect.Left),$($rect.Top))"
+    Write-Log "WARNING: $accountName (PID $processId) did not move (asked for $x,$y, it sits at $($rect.Left),$($rect.Top))"
     Write-ElevationHint
     return $false
 }
@@ -1110,7 +1283,7 @@ function Step-Tiling($accountName)
     }
     if (((Get-Date) - $session.WindowSeenAt).TotalSeconds -lt $windowSettleSeconds) { return }
 
-    Set-ClientWindow $session.ProcessId ([array]::IndexOf($allAccounts, $accountName)) | Out-Null
+    Set-ClientWindow $accountName $session.ProcessId | Out-Null
     Set-SessionState $session "Running"
 }
 
@@ -1216,6 +1389,12 @@ function Stop-Session($accountName, $reason)
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
     }
     Write-Log "$accountName (PID $($session.ProcessId)) $reason, relaunching in $relaunchDelaySeconds s"
+
+    # Kept so one account that drops far more than the others is visible at a glance
+    if ($session.StartedAt)
+    {
+        $session.TotalUpSeconds += [int]((Get-Date) - $session.StartedAt).TotalSeconds
+    }
     $session.ProcessId = 0
     $session.ProcessStartTime = $null
     $session.LogPath = $null
@@ -1290,7 +1469,9 @@ foreach ($accountName in $allAccounts)
                                  State = "Idle"; StateSince = (Get-Date)
                                  LaunchTrackedIds = @(); LaunchedAt = $null; InstallerKilled = $false
                                  LaunchUrl = $null; WindowSeenAt = $null; Paused = $false
-                                 EverStarted = $false }
+                                 EverStarted = $false; AppliedRect = $null
+                                 DropCount = 0; LastDropAt = $null; LastDropReason = $null
+                                 TotalUpSeconds = 0 }
 }
 
 $globalPaused = $false
@@ -1340,7 +1521,7 @@ if ($runningMain)
         # Without a log we cannot see main disconnect, but it is still tracked and tiled
         Write-Log "WARNING: adopted PID $($runningMain.Id) as main $mainAccount but found no matching log, disconnect detection stays off for main until it relaunches"
     }
-    Set-ClientWindow $runningMain.Id 0 | Out-Null                                     # main is always slot 0
+    Set-ClientWindow $mainAccount $runningMain.Id | Out-Null                          # main is always slot 0
 }
 Write-Log "alts: $($altAccounts -join ', ')"
 if ($discordWebhookUrl)
@@ -1432,8 +1613,8 @@ $statusForm.Controls.Add($divider)
 # The real ListView header cannot be themed and would sit there light grey on a dark
 # list, so it is switched off and these labels stand in for it, lined up with the
 # column widths below
-$headerOffsets = @{ Account = 42; Status = 210; Memory = 366; Up = 444 }
-foreach ($headerName in @("Account", "Status", "Memory", "Up"))
+$headerOffsets = @{ Account = 42; Status = 192; Memory = 332; Up = 406; Drops = 482 }
+foreach ($headerName in @("Account", "Status", "Memory", "Up", "Drops"))
 {
     $headerLabel = New-Object System.Windows.Forms.Label
     $headerLabel.Text = $headerName
@@ -1445,7 +1626,7 @@ foreach ($headerName in @("Account", "Status", "Memory", "Up"))
 
 $accountList = New-Object System.Windows.Forms.ListView
 $accountList.Location = New-Object System.Drawing.Point(14, 228)
-$accountList.Size = New-Object System.Drawing.Size(536, 186)
+$accountList.Size = New-Object System.Drawing.Size(536, 166)
 $accountList.View = "Details"
 $accountList.FullRowSelect = $true
 $accountList.GridLines = $false
@@ -1455,10 +1636,11 @@ $accountList.BorderStyle = "None"
 $accountList.BackColor = $themeSurface
 $accountList.ForeColor = $themeText
 $accountList.Columns.Add("", 28) | Out-Null
-$accountList.Columns.Add("Account", 168) | Out-Null
-$accountList.Columns.Add("Status", 156) | Out-Null
-$accountList.Columns.Add("Memory", 78) | Out-Null
-$accountList.Columns.Add("Up", 102) | Out-Null                                        # fills the rest, so no empty sliver column
+$accountList.Columns.Add("Account", 150) | Out-Null
+$accountList.Columns.Add("Status", 140) | Out-Null
+$accountList.Columns.Add("Memory", 74) | Out-Null
+$accountList.Columns.Add("Up", 76) | Out-Null
+$accountList.Columns.Add("Drops", 68) | Out-Null                                      # fills the rest, so no empty sliver column
 foreach ($accountName in $allAccounts)
 {
     $item = New-Object System.Windows.Forms.ListViewItem("")
@@ -1467,10 +1649,20 @@ foreach ($accountName in $allAccounts)
     $item.SubItems.Add("") | Out-Null
     $item.SubItems.Add("") | Out-Null
     $item.SubItems.Add("") | Out-Null
+    $item.SubItems.Add("") | Out-Null
     $item.Tag = $accountName
     $accountList.Items.Add($item) | Out-Null
 }
 $statusForm.Controls.Add($accountList)
+
+# One line of detail for whatever is selected, so the numbers behind a row are readable
+# without cramming more columns in
+$detailLabel = New-Object System.Windows.Forms.Label
+$detailLabel.Location = New-Object System.Drawing.Point(14, 400)
+$detailLabel.Size = New-Object System.Drawing.Size(536, 18)
+$detailLabel.ForeColor = $themeMuted
+$detailLabel.Text = ""
+$statusForm.Controls.Add($detailLabel)
 
 $relaunchButton = New-Object System.Windows.Forms.Button
 $relaunchButton.Text = "Relaunch selected"
@@ -1703,6 +1895,13 @@ $settingsButton.Add_Click({
     $script:useAllMonitors = ($updated.UseAllMonitors -ne "False")
     $script:discordWebhookUrl = $updated.DiscordWebhookUrl
     $script:discordSummaryMinutes = [int]$updated.DiscordSummaryMinutes
+    $script:rememberWindowPositions = ($updated.RememberWindowPositions -ne "False")
+    if (-not $script:rememberWindowPositions -and (Test-Path $positionsPath))
+    {
+        # Turning it off forgets them, otherwise they would come back on re-ticking it
+        Remove-Item $positionsPath -Force -ErrorAction SilentlyContinue
+        Write-Log "forgot the saved window positions"
+    }
     Write-Log "settings saved and applied"
 
     if ($updated.MainAccount -ne $mainAccount -or $updated.AltAccounts -ne $settings.AltAccounts)
@@ -1735,10 +1934,14 @@ function Update-StatusUi
 
         # Subitems keep their own colours (UseItemStyleForSubItems is off), and on a dark
         # background they default to black, so every one has to be set
+        $item.SubItems[5].Text = if ($session.DropCount -gt 0) { "$($session.DropCount)" } else { "-" }
+
         $item.SubItems[1].ForeColor = $themeText
         $item.SubItems[2].ForeColor = $stateColor
         $item.SubItems[3].ForeColor = $themeMuted
         $item.SubItems[4].ForeColor = $themeMuted
+        # Amber once an account is dropping noticeably more than a couple of times
+        $item.SubItems[5].ForeColor = if ($session.DropCount -ge 5) { $themeAmber } else { $themeMuted }
 
         $process = Get-SessionProcess $session
         if ($process)
@@ -1779,6 +1982,44 @@ function Update-StatusUi
     else
     {
         $tileLastDrop.Text = "none yet"
+    }
+
+    if ($accountList.SelectedItems.Count -eq 1)
+    {
+        $detailAccount = $accountList.SelectedItems[0].Tag
+        $detailSession = $sessions[$detailAccount]
+        $parts = New-Object System.Collections.Generic.List[string]
+
+        $liveSeconds = $detailSession.TotalUpSeconds
+        if ($detailSession.StartedAt -and $detailSession.State -eq "Running")
+        {
+            $liveSeconds += [int]((Get-Date) - $detailSession.StartedAt).TotalSeconds
+        }
+        $parts.Add(("up {0}h{1:00}m in total" -f [int]($liveSeconds / 3600), [int](($liveSeconds % 3600) / 60)))
+
+        if ($detailSession.DropCount -gt 0)
+        {
+            $parts.Add("$($detailSession.DropCount) drop$(if ($detailSession.DropCount -ne 1) { 's' })")
+            if ($detailSession.LastDropAt)
+            {
+                $parts.Add(("last {0} min ago, reason {1}" -f [int](((Get-Date) - $detailSession.LastDropAt).TotalMinutes),
+                                                              $detailSession.LastDropReason))
+            }
+        }
+        else
+        {
+            $parts.Add("no drops yet")
+        }
+        if ($detailSession.FailureCount -gt 0) { $parts.Add("$($detailSession.FailureCount) failed launches") }
+
+        # Written as escapes, not literal characters: the file has no BOM, so PowerShell
+        # 5.1 reads it as ANSI and a literal middle dot would come out as mojibake
+        $separator = "  " + [char]0x00B7 + "  "
+        $detailLabel.Text = "$detailAccount  " + [char]0x2013 + "  " + ($parts -join $separator)
+    }
+    else
+    {
+        $detailLabel.Text = if ($accountList.SelectedItems.Count -gt 1) { "$($accountList.SelectedItems.Count) accounts selected" } else { "" }
     }
 
     $selectedCount = $accountList.SelectedItems.Count
@@ -1927,6 +2168,9 @@ function Invoke-SlowChecks
                     if ($disconnectReason)
                     {
                         $script:lastDisconnectAt = Get-Date
+                        $session.DropCount++
+                        $session.LastDropAt = Get-Date
+                        $session.LastDropReason = $disconnectReason
                         $droppedThisPass.Add("$accountName (reason $disconnectReason)")
                         Stop-Session $accountName "disconnected (reason $disconnectReason)"
                     }
@@ -1942,6 +2186,34 @@ function Invoke-SlowChecks
                             ((Get-Date) - $session.StartedAt).TotalMinutes -gt $maximumSessionMinutes)
                     {
                         Stop-Session $accountName "is older than $maximumSessionMinutes min"
+                    }
+                }
+
+                # A window that is no longer where we put it was moved by hand, so that
+                # is where this account wants to be from now on. Compared against the
+                # rectangle we applied rather than the computed slot, otherwise a
+                # remembered position would keep re-detecting itself.
+                if ($rememberWindowPositions -and $session.State -eq "Running" -and $session.AppliedRect)
+                {
+                    $liveProcess = Get-SessionProcess $session
+                    if ($liveProcess)
+                    {
+                        $liveProcess.Refresh()
+                        if ($liveProcess.MainWindowHandle -ne [IntPtr]::Zero)
+                        {
+                            $current = Get-WindowRectangle $liveProcess.MainWindowHandle
+                            if ($current)
+                            {
+                                $applied = $session.AppliedRect -split ','
+                                $movedBy = [math]::Max([math]::Abs($current.X - [int]$applied[0]),
+                                                       [math]::Abs($current.Y - [int]$applied[1]))
+                                if ($movedBy -gt $manualMoveThreshold)
+                                {
+                                    $session.AppliedRect = "$($current.X),$($current.Y),$($current.Width),$($current.Height)"
+                                    Save-WindowPosition $accountName $session.AppliedRect
+                                }
+                            }
+                        }
                     }
                 }
 
