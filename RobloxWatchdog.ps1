@@ -92,6 +92,64 @@ function Write-Log($message)
     }
 }
 
+# ---- Discord ------------------------------------------------------------------------
+
+$alertGreen = 3066993
+$alertAmber = 16086298
+$alertRed   = 15158332
+$pendingWebhooks = New-Object System.Collections.Generic.List[object]
+
+function Send-DiscordAlert($title, $message, $color)
+{
+    # Only the things worth waking up for. Ordinary disconnects are not sent: there were
+    # 152 of them in four days, which would be noise rather than a notification.
+    if (-not $discordWebhookUrl) { return }
+    try
+    {
+        $payload = @{
+            embeds = @(@{
+                title = $title
+                description = $message
+                color = $color
+                footer = @{ text = "Roblox Watchdog on $env:COMPUTERNAME" }
+                timestamp = (Get-Date).ToUniversalTime().ToString("o")
+            })
+        } | ConvertTo-Json -Depth 5 -Compress
+
+        $content = New-Object System.Net.Http.StringContent($payload, [System.Text.Encoding]::UTF8, "application/json")
+        # Posted without waiting: the window must never sit still because Discord is slow
+        $pendingWebhooks.Add($httpClient.PostAsync($discordWebhookUrl, $content))
+    }
+    catch
+    {
+        Write-Log "WARNING: could not send the Discord alert: $($_.Exception.Message)"
+    }
+}
+
+function Complete-PendingWebhooks
+{
+    # Results are collected on a later tick, so a broken webhook shows up in the log
+    # without anything having blocked on it
+    for ($index = $pendingWebhooks.Count - 1; $index -ge 0; $index--)
+    {
+        $task = $pendingWebhooks[$index]
+        if (-not $task.IsCompleted) { continue }
+        $pendingWebhooks.RemoveAt($index)
+        try
+        {
+            $response = $task.Result
+            if (-not $response.IsSuccessStatusCode)
+            {
+                Write-Log "WARNING: Discord webhook replied $([int]$response.StatusCode) '$($response.ReasonPhrase)'"
+            }
+        }
+        catch
+        {
+            Write-Log "WARNING: Discord webhook failed: $($_.Exception.GetBaseException().Message)"
+        }
+    }
+}
+
 function Write-ElevationHint
 {
     # Said once, not on every denial: the old version repeated the same failure every
@@ -100,6 +158,8 @@ function Write-ElevationHint
     $script:elevationHintShown = $true
     Write-Log "HINT: that was denied because the watchdog is not running as administrator while the Roblox clients are."
     Write-Log "HINT: either run the exe as administrator, or stop running Roblox Account Manager as administrator (which also fixes autoclickers)."
+    Send-DiscordAlert "Missing permissions" ("The watchdog is not running as administrator while the Roblox clients are, " +
+        "so tiling, anti-idle and closing strays are all being denied.") $alertAmber
 }
 
 # Defined after Write-Log so a fatal error is written to the log file and not only to
@@ -112,6 +172,11 @@ trap
     {
         Write-Log "FATAL at line $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line.Trim())"
     }
+    # The whole point of the webhook: on 24-09 this died silently and the accounts sat
+    # dead for 74 minutes before anyone noticed
+    Send-DiscordAlert "Watchdog stopped" "It hit an error and has closed:`n``$_``" $alertRed
+    Complete-PendingWebhooks                                                          # give the post a chance before the process goes
+
     # A window app has no console to print to, so say it in a box and point at the log
     [System.Windows.Forms.MessageBox]::Show(
         "$_`r`n`r`nThe watchdog has stopped. The details are in:`r`n$logFilePath",
@@ -247,6 +312,8 @@ function Get-DefaultSettings
         AntiIdleKey            = "Space"
         ReapStrayMinutes       = "3"
         UseAllMonitors         = "True"
+        DiscordWebhookUrl      = ""
+        DiscordSummaryMinutes  = "0"
     }
 }
 
@@ -321,7 +388,7 @@ function Show-SettingsWindow($saved)
 {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Roblox Watchdog"
-    $form.Size = New-Object System.Drawing.Size(600, 680)
+    $form.Size = New-Object System.Drawing.Size(600, 760)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
@@ -380,6 +447,68 @@ function Show-SettingsWindow($saved)
     Add-Row "Anti-idle every min (0=off)" "AntiIdleMinutes" 20 $false
     Add-Row "Anti-idle key" "AntiIdleKey" 20 $false
     Add-Row "Close strays after min (0=off)" "ReapStrayMinutes" 20 $false
+    Add-Row "Discord alerts every min (0=off)" "DiscordSummaryMinutes" 20 $false
+
+    # Its own row rather than Add-Row, to leave space for the Test button beside it
+    $webhookLabel = New-Object System.Windows.Forms.Label
+    $webhookLabel.Text = "Discord webhook (optional)"
+    $webhookLabel.Location = New-Object System.Drawing.Point(15, $rowTop)
+    $webhookLabel.Size = New-Object System.Drawing.Size(225, 20)
+    $webhookLabel.TextAlign = "MiddleLeft"
+    $webhookLabel.ForeColor = $themeMuted
+    $form.Controls.Add($webhookLabel)
+
+    $webhookBox = New-Object System.Windows.Forms.TextBox
+    $webhookBox.Location = New-Object System.Drawing.Point(248, $rowTop)
+    $webhookBox.Size = New-Object System.Drawing.Size(252, 20)
+    $webhookBox.Text = $saved["DiscordWebhookUrl"]
+    Set-ThemedInput $webhookBox
+    $form.Controls.Add($webhookBox)
+    $inputs["DiscordWebhookUrl"] = $webhookBox
+
+    $testButton = New-Object System.Windows.Forms.Button
+    $testButton.Text = "Test"
+    $testButton.Location = New-Object System.Drawing.Point(506, ($rowTop - 1))
+    $testButton.Size = New-Object System.Drawing.Size(62, 23)
+    Set-ThemedButton $testButton $false
+    $testButton.Add_Click({
+        # Sent straight away rather than through the queue, so the result can be shown
+        $url = $webhookBox.Text.Trim()
+        if ($url -notmatch '^https://(discord\.com|discordapp\.com)/api/webhooks/\d+/[\w-]+$')
+        {
+            [System.Windows.Forms.MessageBox]::Show("That does not look like a Discord webhook url.",
+                "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+            return
+        }
+        try
+        {
+            $body = @{ embeds = @(@{ title = "Test message"
+                                     description = "The webhook works. Alerts will arrive here."
+                                     color = $alertGreen }) } | ConvertTo-Json -Depth 5 -Compress
+            $content = New-Object System.Net.Http.StringContent($body, [System.Text.Encoding]::UTF8, "application/json")
+            $response = $httpClient.PostAsync($url, $content).GetAwaiter().GetResult()
+            if ($response.IsSuccessStatusCode)
+            {
+                [System.Windows.Forms.MessageBox]::Show("Sent. Check the channel.", "Roblox Watchdog",
+                    [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+            }
+            else
+            {
+                [System.Windows.Forms.MessageBox]::Show("Discord replied $([int]$response.StatusCode) '$($response.ReasonPhrase)'.",
+                    "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+            }
+        }
+        catch
+        {
+            [System.Windows.Forms.MessageBox]::Show("Could not reach Discord: $($_.Exception.GetBaseException().Message)",
+                "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        }
+    })
+    $form.Controls.Add($testButton)
+    $rowTop += 30
 
     # Closing other clients is destructive, so it is a deliberate choice
     $closeOthersBox = New-Object System.Windows.Forms.CheckBox
@@ -482,6 +611,16 @@ function Test-Settings($settings)
     if ($settings.ReapStrayMinutes -notmatch '^\d{1,3}$') { throw "Close strays after minutes must be a number (0 to turn it off)" }
     $reap = [int]$settings.ReapStrayMinutes
     if ($reap -ne 0 -and ($reap -lt 2 -or $reap -gt 120)) { throw "Close strays after minutes must be 0, or between 2 and 120" }
+
+    # Checked so a mistyped url fails here rather than silently never alerting
+    if ($settings.DiscordWebhookUrl -and
+        $settings.DiscordWebhookUrl -notmatch '^https://(discord\.com|discordapp\.com)/api/webhooks/\d+/[\w-]+$')
+    {
+        throw "Discord webhook must be a https://discord.com/api/webhooks/... url, or empty"
+    }
+    if ($settings.DiscordSummaryMinutes -notmatch '^\d{1,4}$') { throw "Discord alerts every minutes must be a number (0 to turn it off)" }
+    $summary = [int]$settings.DiscordSummaryMinutes
+    if ($summary -ne 0 -and ($summary -lt 5 -or $summary -gt 1440)) { throw "Discord alerts every minutes must be 0, or between 5 and 1440" }
 }
 
 # Reopen the window on a bad value instead of throwing away everything that was typed
@@ -520,6 +659,8 @@ $antiIdleKey = $settings.AntiIdleKey
 $antiIdleVirtualKey = if ($antiIdleKey -eq "Space") { [byte]0x20 } else { [byte][char]([string]$antiIdleKey).ToUpper() }
 $reapStrayMinutes = [int]$settings.ReapStrayMinutes
 $useAllMonitors = ($settings.UseAllMonitors -ne "False")
+$discordWebhookUrl = $settings.DiscordWebhookUrl
+$discordSummaryMinutes = [int]$settings.DiscordSummaryMinutes
 $reportedStrays = @{}                                                                # windowed strays already mentioned, so the log is not spammed
 
 # ---- Watchdog ----------------------------------------------------------------------
@@ -1097,6 +1238,8 @@ function Register-LaunchFailure($accountName, $message)
     if ($session.FailureCount -eq $maximumLaunchFailures)
     {
         Write-Log "ERROR: $accountName has failed $maximumLaunchFailures launches in a row, is RAM running with the web server on?"
+        Send-DiscordAlert "$accountName will not start" ("$maximumLaunchFailures launches in a row have failed. Last reason:`n``$message``" +
+            "`n`nIt keeps retrying, but Roblox Account Manager is probably not running with its web server on.") $alertRed
     }
     Write-Log "retrying $accountName in $backoffSeconds s"
 }
@@ -1155,6 +1298,8 @@ $reallyExit = $false
 $strayClosedCount = 0
 $lastDisconnectAt = $null
 $lastFreeMegabytes = 0
+$lowMemoryAlerted = $false
+$lastSummaryAt = Get-Date
 $watchdogStartedAt = Get-Date
 $tickCount = 0
 $logForm = $null
@@ -1198,6 +1343,11 @@ if ($runningMain)
     Set-ClientWindow $runningMain.Id 0 | Out-Null                                     # main is always slot 0
 }
 Write-Log "alts: $($altAccounts -join ', ')"
+if ($discordWebhookUrl)
+{
+    Write-Log "Discord alerts are on$(if ($discordSummaryMinutes -gt 0) { ", with a status message every $discordSummaryMinutes min" })"
+    Send-DiscordAlert "Watchdog started" ("Watching $($allAccounts.Count) accounts: " + ($allAccounts -join ", ")) $alertGreen
+}
 
 if ($closeOtherClients)
 {
@@ -1551,6 +1701,8 @@ $settingsButton.Add_Click({
     $script:reapStrayMinutes = [int]$updated.ReapStrayMinutes
     $script:closeOtherClients = ($updated.CloseOtherClients -ne "False")
     $script:useAllMonitors = ($updated.UseAllMonitors -ne "False")
+    $script:discordWebhookUrl = $updated.DiscordWebhookUrl
+    $script:discordSummaryMinutes = [int]$updated.DiscordSummaryMinutes
     Write-Log "settings saved and applied"
 
     if ($updated.MainAccount -ne $mainAccount -or $updated.AltAccounts -ne $settings.AltAccounts)
@@ -1674,6 +1826,7 @@ function Invoke-SlowChecks
         {
             $freeMegabytes = Get-FreeMegabytes
             $script:lastFreeMegabytes = [int]$freeMegabytes
+            if ($freeMegabytes -ge $minimumFreeMegabytes) { $script:lowMemoryAlerted = $false }
             if ($freeMegabytes -lt $minimumFreeMegabytes)
             {
                 $largestAlt = Get-RobloxClients |
@@ -1689,6 +1842,12 @@ function Invoke-SlowChecks
                 else
                 {
                     Write-Log "WARNING: only $([int]$freeMegabytes) MB free and no alt left to kill"
+                    if (-not $script:lowMemoryAlerted)
+                    {
+                        $script:lowMemoryAlerted = $true                              # once, not every ten seconds
+                        Send-DiscordAlert "Out of memory" ("Only $([int]$freeMegabytes) MB free and there is no alt left to close. " +
+                            "Main is never closed, so nothing more can be freed automatically.") $alertRed
+                    }
                 }
             }
         }
@@ -1710,6 +1869,10 @@ function Invoke-SlowChecks
     {
         try { $script:lastFreeMegabytes = [int](Get-FreeMegabytes) } catch { }
     }
+
+    # A single disconnect is routine and not worth a notification; several at once means
+    # the server went down and is worth knowing about, so they are collected and sent once
+    $droppedThisPass = New-Object System.Collections.Generic.List[string]
 
     # Focusing a window and holding a key takes most of a second, so only one account
     # gets poked per pass; several at once would visibly freeze the window
@@ -1764,6 +1927,7 @@ function Invoke-SlowChecks
                     if ($disconnectReason)
                     {
                         $script:lastDisconnectAt = Get-Date
+                        $droppedThisPass.Add("$accountName (reason $disconnectReason)")
                         Stop-Session $accountName "disconnected (reason $disconnectReason)"
                     }
                     elseif (-not $session.JoinedAt -and $session.StartedAt -and
@@ -1797,6 +1961,34 @@ function Invoke-SlowChecks
             Write-Log "WARNING: checking $accountName failed: $($_.Exception.Message)"
         }
     }
+
+    if ($droppedThisPass.Count -gt 1)
+    {
+        Send-DiscordAlert "$($droppedThisPass.Count) accounts dropped at once" ((
+            "They are being relaunched one at a time.`n`n" + ($droppedThisPass -join "`n"))) $alertAmber
+    }
+
+    if ($discordSummaryMinutes -gt 0 -and ((Get-Date) - $script:lastSummaryAt).TotalMinutes -ge $discordSummaryMinutes)
+    {
+        $script:lastSummaryAt = Get-Date
+        $playing = 0
+        $notPlaying = New-Object System.Collections.Generic.List[string]
+        foreach ($accountName in $allAccounts)
+        {
+            $session = $sessions[$accountName]
+            if ($session.State -eq "Running" -and $session.JoinedAt) { $playing++ }
+            else { $notPlaying.Add("$accountName - $(Get-SessionStatusText $accountName)") }
+        }
+        $watchdogUp = (Get-Date) - $watchdogStartedAt
+        $summary = "**$playing / $($allAccounts.Count)** playing`n" +
+                   "Free memory: $script:lastFreeMegabytes MB`n" +
+                   ("Watchdog up: {0}h{1:00}m" -f [int]$watchdogUp.TotalHours, $watchdogUp.Minutes)
+        if ($notPlaying.Count -gt 0) { $summary += "`n`nNot playing:`n" + ($notPlaying -join "`n") }
+        $color = if ($playing -eq $allAccounts.Count) { $alertGreen } else { $alertAmber }
+        Send-DiscordAlert "Status" $summary $color
+    }
+
+    Complete-PendingWebhooks
 }
 
 function Invoke-WatchdogTick
