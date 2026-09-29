@@ -112,14 +112,14 @@ $alertAmber = 16086298
 $alertRed   = 15158332
 $pendingWebhooks = New-Object System.Collections.Generic.List[object]
 
-function Send-DiscordAlert($title, $message, $color)
+function Send-DiscordAlert($title, $message, $color, $ping)
 {
     # Only the things worth waking up for. Ordinary disconnects are not sent: there were
     # 152 of them in four days, which would be noise rather than a notification.
     if (-not $discordWebhookUrl) { return }
     try
     {
-        $payload = @{
+        $body = @{
             embeds = @(@{
                 title = $title
                 description = $message
@@ -127,7 +127,17 @@ function Send-DiscordAlert($title, $message, $color)
                 footer = @{ text = "Roblox Watchdog on $env:COMPUTERNAME" }
                 timestamp = (Get-Date).ToUniversalTime().ToString("o")
             })
-        } | ConvertTo-Json -Depth 5 -Compress
+        }
+
+        if ($ping -and $discordPingId)
+        {
+            # Has to go in content, not in the embed: Discord does not raise a
+            # notification for a mention that only appears inside an embed
+            $body["content"] = "<@$discordPingId>"
+            $body["allowed_mentions"] = @{ parse = @("users", "roles") }
+        }
+
+        $payload = $body | ConvertTo-Json -Depth 5 -Compress
 
         $content = New-Object System.Net.Http.StringContent($payload, [System.Text.Encoding]::UTF8, "application/json")
         # Posted without waiting: the window must never sit still because Discord is slow
@@ -387,6 +397,7 @@ function Get-DefaultSettings
         ReapStrayMinutes       = "3"
         UseAllMonitors         = "True"
         DiscordWebhookUrl      = ""
+        DiscordPingId          = ""
         DiscordSummaryMinutes  = "0"
         RememberWindowPositions = "True"
     }
@@ -463,7 +474,7 @@ function Show-SettingsWindow($saved)
 {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Roblox Watchdog"
-    $form.Size = New-Object System.Drawing.Size(600, 760)
+    $form.Size = New-Object System.Drawing.Size(600, 800)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
@@ -523,6 +534,7 @@ function Show-SettingsWindow($saved)
     Add-Row "Anti-idle key" "AntiIdleKey" 20 $false
     Add-Row "Close strays after min (0=off)" "ReapStrayMinutes" 20 $false
     Add-Row "Discord alerts every min (0=off)" "DiscordSummaryMinutes" 20 $false
+    Add-Row "Discord id to ping for main" "DiscordPingId" 20 $false
 
     # Its own row rather than Add-Row, to leave space for the Test button beside it
     $webhookLabel = New-Object System.Windows.Forms.Label
@@ -704,6 +716,16 @@ function Test-Settings($settings)
     {
         throw "Discord webhook must be a https://discord.com/api/webhooks/... url, or empty"
     }
+    # A Discord user or role id is a 17 to 20 digit snowflake. Accepted with or without
+    # the <@...> wrapper, since that is what you get from Copy ID in some clients.
+    if ($settings.DiscordPingId)
+    {
+        if ($settings.DiscordPingId -notmatch '^<?@?&?(\d{17,20})>?$')
+        {
+            throw "Discord id to ping must be a user or role id (17 to 20 digits), or empty"
+        }
+        $settings.DiscordPingId = $Matches[1]
+    }
     if ($settings.DiscordSummaryMinutes -notmatch '^\d{1,4}$') { throw "Discord alerts every minutes must be a number (0 to turn it off)" }
     $summary = [int]$settings.DiscordSummaryMinutes
     if ($summary -ne 0 -and ($summary -lt 5 -or $summary -gt 1440)) { throw "Discord alerts every minutes must be 0, or between 5 and 1440" }
@@ -762,6 +784,7 @@ $antiIdleVirtualKey = if ($antiIdleKey -eq "Space") { [byte]0x20 } else { [byte]
 $reapStrayMinutes = [int]$settings.ReapStrayMinutes
 $useAllMonitors = ($settings.UseAllMonitors -ne "False")
 $discordWebhookUrl = $settings.DiscordWebhookUrl
+$discordPingId = $settings.DiscordPingId
 $discordSummaryMinutes = [int]$settings.DiscordSummaryMinutes
 $rememberWindowPositions = ($settings.RememberWindowPositions -ne "False")
 $reportedStrays = @{}                                                                # windowed strays already mentioned, so the log is not spammed
@@ -1894,6 +1917,7 @@ $settingsButton.Add_Click({
     $script:closeOtherClients = ($updated.CloseOtherClients -ne "False")
     $script:useAllMonitors = ($updated.UseAllMonitors -ne "False")
     $script:discordWebhookUrl = $updated.DiscordWebhookUrl
+    $script:discordPingId = $updated.DiscordPingId
     $script:discordSummaryMinutes = [int]$updated.DiscordSummaryMinutes
     $script:rememberWindowPositions = ($updated.RememberWindowPositions -ne "False")
     if (-not $script:rememberWindowPositions -and (Test-Path $positionsPath))
@@ -2114,6 +2138,7 @@ function Invoke-SlowChecks
     # A single disconnect is routine and not worth a notification; several at once means
     # the server went down and is worth knowing about, so they are collected and sent once
     $droppedThisPass = New-Object System.Collections.Generic.List[string]
+    $mainDroppedThisPass = $false
 
     # Focusing a window and holding a key takes most of a second, so only one account
     # gets poked per pass; several at once would visibly freeze the window
@@ -2172,6 +2197,7 @@ function Invoke-SlowChecks
                         $session.LastDropAt = Get-Date
                         $session.LastDropReason = $disconnectReason
                         $droppedThisPass.Add("$accountName (reason $disconnectReason)")
+                        if ($accountName -eq $mainAccount) { $mainDroppedThisPass = $true }
                         Stop-Session $accountName "disconnected (reason $disconnectReason)"
                     }
                     elseif (-not $session.JoinedAt -and $session.StartedAt -and
@@ -2234,7 +2260,22 @@ function Invoke-SlowChecks
         }
     }
 
-    if ($droppedThisPass.Count -gt 1)
+    # Main dropping is the one worth being interrupted for, so it pings. Sent as one
+    # message either way: if main went down with the others, the group alert carries the
+    # ping rather than firing a second notification for the same event.
+    if ($mainDroppedThisPass)
+    {
+        if ($droppedThisPass.Count -gt 1)
+        {
+            Send-DiscordAlert "Main dropped, with $($droppedThisPass.Count - 1) other$(if ($droppedThisPass.Count -ne 2) { 's' })" ((
+                "They are being relaunched one at a time.`n`n" + ($droppedThisPass -join "`n"))) $alertRed $true
+        }
+        else
+        {
+            Send-DiscordAlert "Main dropped" ("$($droppedThisPass[0]).`n`nIt is being relaunched.") $alertRed $true
+        }
+    }
+    elseif ($droppedThisPass.Count -gt 1)
     {
         Send-DiscordAlert "$($droppedThisPass.Count) accounts dropped at once" ((
             "They are being relaunched one at a time.`n`n" + ($droppedThisPass -join "`n"))) $alertAmber
