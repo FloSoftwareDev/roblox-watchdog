@@ -47,7 +47,7 @@ $windowTimeoutSeconds = 60                                                      
 $windowSettleSeconds = 5                                                             # let Roblox restore its own size before moving it
 $manualMoveThreshold = 60                                                            # further than Roblox's own nudging, so only a real drag counts
 $stepGapMilliseconds = 200                                                           # between steps with no explicit wait of their own
-$stepRun = @{ Active = $false; Steps = @(); Index = 0; NextAt = $null; Reason = $null }
+$stepRun = @{ Active = $false; Steps = @(); Index = 0; NextAt = $null; Reason = $null; HeldKey = $null }
 $maximumLaunchFailures = 5                                                           # log loudly after this many failed launches in a row
 $logFolder = Join-Path $env:LOCALAPPDATA "Roblox\logs"                              # Roblox client log files
 $disconnectPattern = "Sending disconnect with reason: (\d+)"                         # logged on drop (277) and leave (285)
@@ -645,7 +645,7 @@ function Show-SettingsWindow($saved)
     $form.Controls.Add($stepsLabel)
 
     $stepsHint = New-Object System.Windows.Forms.Label
-    $stepsHint.Text = "key 2" + [char]0x2003 + "click 0.5,0.6" + [char]0x2003 + "wait 7000"
+    $stepsHint.Text = "key 2   hold w 4200" + [char]0x2003 + "scroll -6" + [char]0x2003 + "click 0.5,0.6   wait 7000"
     $stepsHint.Location = New-Object System.Drawing.Point(15, ($rowTop + 20))
     $stepsHint.Size = New-Object System.Drawing.Size(225, 34)
     $stepsHint.ForeColor = $themeMuted
@@ -1233,6 +1233,19 @@ function Set-WindowFocused($handle)
 
 # ---- Step list ---------------------------------------------------------------------
 
+function Get-StepKeyCode($keyName, $lineNumber)
+{
+    if ($keyName.Length -eq 1 -and $keyName -match '[A-Za-z0-9]')
+    {
+        return [byte][char]([string]$keyName).ToUpper()
+    }
+    # The ones worth naming: movement and camera keys people actually hold down
+    $named = @{ space = 0x20; shift = 0x10; ctrl = 0x11; alt = 0x12; tab = 0x09; enter = 0x0D
+                esc = 0x1B; up = 0x26; down = 0x28; left = 0x25; right = 0x27 }
+    if ($named.ContainsKey($keyName.ToLower())) { return [byte]$named[$keyName.ToLower()] }
+    throw "line $lineNumber : '$keyName' is not a letter, a digit, or one of $(($named.Keys | Sort-Object) -join ', ')"
+}
+
 function Get-StepList($stepText)
 {
     # One step per line. Anything unrecognised is reported rather than ignored, so a
@@ -1247,19 +1260,26 @@ function Get-StepList($stepText)
 
         if ($trimmed -match '^key\s+(\S+)$')
         {
-            $keyName = $Matches[1]
-            if ($keyName.Length -eq 1 -and $keyName -match '[A-Za-z0-9]')
+            $steps.Add([pscustomobject]@{ Kind = "key"; Key = (Get-StepKeyCode $Matches[1] $lineNumber) })
+        }
+        elseif ($trimmed -match '^hold\s+(\S+)\s+(\d{1,6})$')
+        {
+            # Expanded here into down, wait, up. The runner then only ever deals with
+            # instant steps, so a four second walk still costs one tick per step rather
+            # than blocking for four seconds.
+            $keyCode = Get-StepKeyCode $Matches[1] $lineNumber
+            $steps.Add([pscustomobject]@{ Kind = "keydown"; Key = $keyCode })
+            $steps.Add([pscustomobject]@{ Kind = "wait"; Milliseconds = [int]$Matches[2] })
+            $steps.Add([pscustomobject]@{ Kind = "keyup"; Key = $keyCode })
+        }
+        elseif ($trimmed -match '^scroll\s+(-?\d{1,3})$')
+        {
+            $clicks = [int]$Matches[1]
+            if ($clicks -eq 0 -or [math]::Abs($clicks) -gt 50)
             {
-                $steps.Add([pscustomobject]@{ Kind = "key"; Key = [byte][char]([string]$keyName).ToUpper() })
+                throw "line $lineNumber : scroll needs a number of clicks between -50 and 50, not 0"
             }
-            elseif ($keyName -eq "space")
-            {
-                $steps.Add([pscustomobject]@{ Kind = "key"; Key = [byte]0x20 })
-            }
-            else
-            {
-                throw "line $lineNumber : '$keyName' is not a single letter, digit or 'space'"
-            }
+            $steps.Add([pscustomobject]@{ Kind = "scroll"; Clicks = $clicks })
         }
         elseif ($trimmed -match '^click\s+([0-9]*\.?[0-9]+)\s*,\s*([0-9]*\.?[0-9]+)$')
         {
@@ -1306,15 +1326,26 @@ function Start-StepRun($reason)
         return
     }
 
-    $script:stepRun = @{ Active = $true; Steps = $steps; Index = 0; NextAt = (Get-Date); Reason = $reason }
+    $script:stepRun = @{ Active = $true; Steps = $steps; Index = 0; NextAt = (Get-Date); Reason = $reason; HeldKey = $null }
     Write-Log "running $($steps.Count) steps on $mainAccount ($reason)"
 }
 
 function Stop-StepRun($reason)
 {
     if (-not $script:stepRun.Active) { return }
+
+    # A run aborted in the middle of a hold would otherwise leave the key down and the
+    # character walking off on its own
+    if ($script:stepRun.HeldKey)
+    {
+        $heldKey = [byte]$script:stepRun.HeldKey
+        $scanCode = [byte]([Win32.Window]::MapVirtualKey($heldKey, 0))
+        [Win32.Window]::keybd_event($heldKey, $scanCode, 2, [UIntPtr]::Zero)          # KEYEVENTF_KEYUP
+        Write-Log "released the key that was being held"
+    }
+
     Write-Log "step run stopped after $($script:stepRun.Index) of $($script:stepRun.Steps.Count) steps: $reason"
-    $script:stepRun = @{ Active = $false; Steps = @(); Index = 0; NextAt = $null; Reason = $null }
+    $script:stepRun = @{ Active = $false; Steps = @(); Index = 0; NextAt = $null; Reason = $null; HeldKey = $null }
 }
 
 function Step-StepRun
@@ -1366,6 +1397,31 @@ function Step-StepRun
         [Win32.Window]::keybd_event($step.Key, $scanCode, 0, [UIntPtr]::Zero)
         Start-Sleep -Milliseconds 60
         [Win32.Window]::keybd_event($step.Key, $scanCode, 2, [UIntPtr]::Zero)
+    }
+    elseif ($step.Kind -eq "keydown")
+    {
+        # Left held while the following wait step runs, which is how walking works
+        $scanCode = [byte]([Win32.Window]::MapVirtualKey($step.Key, 0))
+        [Win32.Window]::keybd_event($step.Key, $scanCode, 0, [UIntPtr]::Zero)
+        $script:stepRun.HeldKey = $step.Key
+    }
+    elseif ($step.Kind -eq "keyup")
+    {
+        $scanCode = [byte]([Win32.Window]::MapVirtualKey($step.Key, 0))
+        [Win32.Window]::keybd_event($step.Key, $scanCode, 2, [UIntPtr]::Zero)
+        $script:stepRun.HeldKey = $null
+    }
+    elseif ($step.Kind -eq "scroll")
+    {
+        # The wheel goes to whatever is under the pointer, so it has to be over the
+        # window first or the zoom lands on something else entirely
+        $windowRect = Get-WindowRectangle $handle
+        if (-not $windowRect) { Stop-StepRun "could not read the window position"; return }
+        [Win32.Window]::SetCursorPos([int]($windowRect.X + $windowRect.Width / 2),
+                                     [int]($windowRect.Y + $windowRect.Height / 2)) | Out-Null
+        Start-Sleep -Milliseconds 40
+        # One notch is 120, negative scrolls back, which is zoom out in Roblox
+        [Win32.Window]::mouse_event(0x0800, 0, 0, [uint32]($step.Clicks * 120), [UIntPtr]::Zero)
     }
     elseif ($step.Kind -eq "click")
     {
