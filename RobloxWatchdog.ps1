@@ -46,6 +46,8 @@ $logTimeoutSeconds = 30                                                         
 $windowTimeoutSeconds = 60                                                           # no window by then = leave it untiled
 $windowSettleSeconds = 5                                                             # let Roblox restore its own size before moving it
 $manualMoveThreshold = 60                                                            # further than Roblox's own nudging, so only a real drag counts
+$stepGapMilliseconds = 200                                                           # between steps with no explicit wait of their own
+$stepRun = @{ Active = $false; Steps = @(); Index = 0; NextAt = $null; Reason = $null }
 $maximumLaunchFailures = 5                                                           # log loudly after this many failed launches in a row
 $logFolder = Join-Path $env:LOCALAPPDATA "Roblox\logs"                              # Roblox client log files
 $disconnectPattern = "Sending disconnect with reason: (\d+)"                         # logged on drop (277) and leave (285)
@@ -400,6 +402,8 @@ function Get-DefaultSettings
         DiscordPingId          = ""
         DiscordSummaryMinutes  = "0"
         RememberWindowPositions = "True"
+        StepList                = ""
+        RunStepsOnRejoin        = "False"
     }
 }
 
@@ -478,6 +482,9 @@ function Show-SettingsWindow($saved)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
+    # Scrolls rather than growing taller with every setting added, so it still fits on a
+    # 1080p screen and there is room for more rows later
+    $form.AutoScroll = $true
     Set-ThemedForm $form
 
     $inputs = @{}
@@ -628,6 +635,102 @@ function Show-SettingsWindow($saved)
     $form.Controls.Add($rememberPositionsBox)
     $rowTop += 30
 
+    # Step list: its own multiline box with a Pick button, since a coordinate you have
+    # to type is both miserable and wrong the moment a window moves
+    $stepsLabel = New-Object System.Windows.Forms.Label
+    $stepsLabel.Text = "Steps to run on main"
+    $stepsLabel.Location = New-Object System.Drawing.Point(15, $rowTop)
+    $stepsLabel.Size = New-Object System.Drawing.Size(225, 20)
+    $stepsLabel.ForeColor = $themeMuted
+    $form.Controls.Add($stepsLabel)
+
+    $stepsHint = New-Object System.Windows.Forms.Label
+    $stepsHint.Text = "key 2" + [char]0x2003 + "click 0.5,0.6" + [char]0x2003 + "wait 7000"
+    $stepsHint.Location = New-Object System.Drawing.Point(15, ($rowTop + 20))
+    $stepsHint.Size = New-Object System.Drawing.Size(225, 34)
+    $stepsHint.ForeColor = $themeMuted
+    $form.Controls.Add($stepsHint)
+
+    $stepsBox = New-Object System.Windows.Forms.TextBox
+    $stepsBox.Location = New-Object System.Drawing.Point(248, $rowTop)
+    $stepsBox.Size = New-Object System.Drawing.Size(252, 90)
+    $stepsBox.Multiline = $true
+    $stepsBox.AcceptsReturn = $true
+    $stepsBox.ScrollBars = "Vertical"
+    $stepsBox.Font = New-Object System.Drawing.Font("Consolas", 9)
+    $stepsBox.Text = $saved["StepList"]
+    Set-ThemedInput $stepsBox
+    $form.Controls.Add($stepsBox)
+    $inputs["StepList"] = $stepsBox
+
+    $pickButton = New-Object System.Windows.Forms.Button
+    $pickButton.Text = "Pick"
+    $pickButton.Location = New-Object System.Drawing.Point(506, ($rowTop - 1))
+    $pickButton.Size = New-Object System.Drawing.Size(62, 23)
+    Set-ThemedButton $pickButton $false
+    $pickButton.Add_Click({
+        $mainProcess = $null
+        foreach ($candidate in (Get-Process $processName -ErrorAction SilentlyContinue | Sort-Object StartTime))
+        {
+            $candidate.Refresh()
+            if ($candidate.MainWindowHandle -ne [IntPtr]::Zero) { $mainProcess = $candidate; break }
+        }
+        if (-not $mainProcess)
+        {
+            [System.Windows.Forms.MessageBox]::Show("No Roblox window is open to pick a spot in.",
+                "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+            return
+        }
+        $windowRect = Get-WindowRectangle $mainProcess.MainWindowHandle
+        if (-not $windowRect) { return }
+
+        [System.Windows.Forms.MessageBox]::Show(
+            "Click the spot you want, inside the Roblox window.`r`n`r`nPress Escape to cancel.",
+            "Pick a spot", [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+
+        # Polled rather than hooked: a global mouse hook in a WinForms app this size is
+        # far more trouble than reading the button state a few times a second
+        $deadline = (Get-Date).AddSeconds(30)
+        while ((Get-Date) -lt $deadline)
+        {
+            if ([Win32.Window]::GetAsyncKeyState(0x1B) -ne 0) { return }               # VK_ESCAPE
+            if ([Win32.Window]::GetAsyncKeyState(0x01) -lt 0)                          # VK_LBUTTON, high bit = down
+            {
+                $point = New-Object POINT
+                if (-not [WinPos]::GetCursorPos([ref]$point)) { return }
+                $fractionX = [math]::Round((($point.X - $windowRect.X) / $windowRect.Width), 4)
+                $fractionY = [math]::Round((($point.Y - $windowRect.Y) / $windowRect.Height), 4)
+                if ($fractionX -lt 0 -or $fractionX -gt 1 -or $fractionY -lt 0 -or $fractionY -gt 1)
+                {
+                    [System.Windows.Forms.MessageBox]::Show("That click was outside the Roblox window.",
+                        "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
+                        [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+                    return
+                }
+                $newLine = "click $fractionX,$fractionY"
+                if ($stepsBox.Text -and -not $stepsBox.Text.EndsWith("`n")) { $stepsBox.AppendText("`r`n") }
+                $stepsBox.AppendText($newLine)
+                while ([Win32.Window]::GetAsyncKeyState(0x01) -lt 0) { Start-Sleep -Milliseconds 50 }
+                return
+            }
+            Start-Sleep -Milliseconds 40
+        }
+    })
+    $form.Controls.Add($pickButton)
+    $rowTop += 100
+
+    $runOnRejoinBox = New-Object System.Windows.Forms.CheckBox
+    $runOnRejoinBox.Text = "Run the steps by itself when main rejoins"
+    $runOnRejoinBox.Location = New-Object System.Drawing.Point(248, $rowTop)
+    $runOnRejoinBox.Size = New-Object System.Drawing.Size(320, 20)
+    $runOnRejoinBox.Checked = ($saved["RunStepsOnRejoin"] -eq "True")
+    $runOnRejoinBox.FlatStyle = "Flat"
+    $runOnRejoinBox.ForeColor = $themeText
+    $form.Controls.Add($runOnRejoinBox)
+    $rowTop += 30
+
     $note = New-Object System.Windows.Forms.Label
     $note.Text = "A running client is adopted as main; otherwise main is launched."
     $note.Location = New-Object System.Drawing.Point(15, $rowTop)
@@ -660,6 +763,7 @@ function Show-SettingsWindow($saved)
     $result["CloseOtherClients"] = [string]$closeOthersBox.Checked
     $result["UseAllMonitors"] = [string]$allMonitorsBox.Checked
     $result["RememberWindowPositions"] = [string]$rememberPositionsBox.Checked
+    $result["RunStepsOnRejoin"] = [string]$runOnRejoinBox.Checked
     return $result
 }
 
@@ -726,6 +830,13 @@ function Test-Settings($settings)
         }
         $settings.DiscordPingId = $Matches[1]
     }
+    # Checked here so a typo is caught while you are looking at the dialog, rather than
+    # halfway through a run that is already clicking things
+    if ($settings.StepList)
+    {
+        try { Get-StepList $settings.StepList | Out-Null }
+        catch { throw "Steps: $($_.Exception.Message)" }
+    }
     if ($settings.DiscordSummaryMinutes -notmatch '^\d{1,4}$') { throw "Discord alerts every minutes must be a number (0 to turn it off)" }
     $summary = [int]$settings.DiscordSummaryMinutes
     if ($summary -ne 0 -and ($summary -lt 5 -or $summary -gt 1440)) { throw "Discord alerts every minutes must be 0, or between 5 and 1440" }
@@ -787,6 +898,8 @@ $discordWebhookUrl = $settings.DiscordWebhookUrl
 $discordPingId = $settings.DiscordPingId
 $discordSummaryMinutes = [int]$settings.DiscordSummaryMinutes
 $rememberWindowPositions = ($settings.RememberWindowPositions -ne "False")
+$stepListText = $settings.StepList
+$runStepsOnRejoin = ($settings.RunStepsOnRejoin -eq "True")
 $reportedStrays = @{}                                                                # windowed strays already mentioned, so the log is not spammed
 
 # ---- Watchdog ----------------------------------------------------------------------
@@ -848,6 +961,9 @@ Add-Type -Namespace Win32 -Name Window -MemberDefinition @"
 [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool altTab);
 [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint uCode, uint uMapType);
+[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+[DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+[DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key);
 "@
 
 # Separate block because it needs a struct, which -MemberDefinition cannot declare.
@@ -857,9 +973,13 @@ Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public struct RECT { public int Left, Top, Right, Bottom; }
+public struct POINT { public int X; public int Y; }
 public class WinPos
 {
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+    // Lives here rather than in the member-definition block above, which compiles on its
+    // own and cannot see a struct declared in a different Add-Type call
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
 }
 "@
 
@@ -1096,6 +1216,176 @@ function Remove-StrayClients
     }
 }
 
+function Set-WindowFocused($handle)
+{
+    # Roblox only counts input while its window has focus, so anything that sends input
+    # has to get it first. Windows refuses SetForegroundWindow unless the caller already
+    # owns the foreground, and SwitchToThisWindow is not bound by that.
+    [Win32.Window]::ShowWindow($handle, 9) | Out-Null                                 # SW_RESTORE, a minimised window cannot take focus
+    [Win32.Window]::SetForegroundWindow($handle) | Out-Null
+    Start-Sleep -Milliseconds 250
+    if ([Win32.Window]::GetForegroundWindow() -eq $handle) { return $true }
+
+    [Win32.Window]::SwitchToThisWindow($handle, $true)
+    Start-Sleep -Milliseconds 250
+    return ([Win32.Window]::GetForegroundWindow() -eq $handle)
+}
+
+# ---- Step list ---------------------------------------------------------------------
+
+function Get-StepList($stepText)
+{
+    # One step per line. Anything unrecognised is reported rather than ignored, so a
+    # typo does not quietly turn into a sequence that clicks the wrong things.
+    $steps = New-Object System.Collections.Generic.List[object]
+    $lineNumber = 0
+    foreach ($line in ($stepText -split "`r?`n"))
+    {
+        $lineNumber++
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith("#")) { continue }
+
+        if ($trimmed -match '^key\s+(\S+)$')
+        {
+            $keyName = $Matches[1]
+            if ($keyName.Length -eq 1 -and $keyName -match '[A-Za-z0-9]')
+            {
+                $steps.Add([pscustomobject]@{ Kind = "key"; Key = [byte][char]([string]$keyName).ToUpper() })
+            }
+            elseif ($keyName -eq "space")
+            {
+                $steps.Add([pscustomobject]@{ Kind = "key"; Key = [byte]0x20 })
+            }
+            else
+            {
+                throw "line $lineNumber : '$keyName' is not a single letter, digit or 'space'"
+            }
+        }
+        elseif ($trimmed -match '^click\s+([0-9]*\.?[0-9]+)\s*,\s*([0-9]*\.?[0-9]+)$')
+        {
+            $fractionX = [double]$Matches[1]
+            $fractionY = [double]$Matches[2]
+            if ($fractionX -lt 0 -or $fractionX -gt 1 -or $fractionY -lt 0 -or $fractionY -gt 1)
+            {
+                throw "line $lineNumber : click needs fractions of the window between 0 and 1"
+            }
+            $steps.Add([pscustomobject]@{ Kind = "click"; X = $fractionX; Y = $fractionY })
+        }
+        elseif ($trimmed -match '^wait\s+(\d{1,6})$')
+        {
+            $steps.Add([pscustomobject]@{ Kind = "wait"; Milliseconds = [int]$Matches[1] })
+        }
+        else
+        {
+            throw "line $lineNumber : '$trimmed' is not 'key X', 'click x,y' or 'wait ms'"
+        }
+    }
+    return $steps
+}
+
+function Start-StepRun($reason)
+{
+    if ($script:stepRun.Active) { return }
+    if (-not $stepListText) { return }
+
+    try
+    {
+        $steps = Get-StepList $stepListText
+    }
+    catch
+    {
+        Write-Log "ERROR: the step list has a problem, $($_.Exception.Message)"
+        return
+    }
+    if ($steps.Count -eq 0) { return }
+
+    $session = $sessions[$mainAccount]
+    if ($session.State -ne "Running" -or -not $session.JoinedAt)
+    {
+        Write-Log "not running the steps: $mainAccount is not in the game"
+        return
+    }
+
+    $script:stepRun = @{ Active = $true; Steps = $steps; Index = 0; NextAt = (Get-Date); Reason = $reason }
+    Write-Log "running $($steps.Count) steps on $mainAccount ($reason)"
+}
+
+function Stop-StepRun($reason)
+{
+    if (-not $script:stepRun.Active) { return }
+    Write-Log "step run stopped after $($script:stepRun.Index) of $($script:stepRun.Steps.Count) steps: $reason"
+    $script:stepRun = @{ Active = $false; Steps = @(); Index = 0; NextAt = $null; Reason = $null }
+}
+
+function Step-StepRun
+{
+    # One step per tick at most, so a sequence with long waits in it never blocks the
+    # window the way the old launch code did
+    if (-not $script:stepRun.Active) { return }
+    if ((Get-Date) -lt $script:stepRun.NextAt) { return }
+
+    $session = $sessions[$mainAccount]
+    if ($session.State -ne "Running" -or -not $session.JoinedAt)
+    {
+        Stop-StepRun "$mainAccount left the game"
+        return
+    }
+
+    if ($script:stepRun.Index -ge $script:stepRun.Steps.Count)
+    {
+        Write-Log "step run finished on $mainAccount"
+        Stop-StepRun "finished"
+        return
+    }
+
+    $step = $script:stepRun.Steps[$script:stepRun.Index]
+    $script:stepRun.Index++
+
+    if ($step.Kind -eq "wait")
+    {
+        $script:stepRun.NextAt = (Get-Date).AddMilliseconds($step.Milliseconds)
+        return
+    }
+
+    $process = Get-SessionProcess $session
+    if (-not $process) { Stop-StepRun "$mainAccount is gone"; return }
+    $process.Refresh()
+    $handle = $process.MainWindowHandle
+    if ($handle -eq [IntPtr]::Zero) { Stop-StepRun "$mainAccount has no window"; return }
+
+    if (-not (Set-WindowFocused $handle))
+    {
+        Stop-StepRun "could not focus $mainAccount"
+        Write-ElevationHint
+        return
+    }
+
+    if ($step.Kind -eq "key")
+    {
+        $scanCode = [byte]([Win32.Window]::MapVirtualKey($step.Key, 0))
+        [Win32.Window]::keybd_event($step.Key, $scanCode, 0, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 60
+        [Win32.Window]::keybd_event($step.Key, $scanCode, 2, [UIntPtr]::Zero)
+    }
+    elseif ($step.Kind -eq "click")
+    {
+        # Fractions of the window, not screen pixels, so the same list works whichever
+        # monitor the window ended up on and whatever size the tile is
+        $windowRect = Get-WindowRectangle $handle
+        if (-not $windowRect) { Stop-StepRun "could not read the window position"; return }
+        $targetX = [int]($windowRect.X + ($windowRect.Width * $step.X))
+        $targetY = [int]($windowRect.Y + ($windowRect.Height * $step.Y))
+        [Win32.Window]::SetCursorPos($targetX, $targetY) | Out-Null
+        Start-Sleep -Milliseconds 40
+        [Win32.Window]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)                 # left down
+        Start-Sleep -Milliseconds 50
+        [Win32.Window]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)                 # left up
+    }
+
+    # Steps with no explicit wait still get a moment, or the game sees them as one action
+    $script:stepRun.NextAt = (Get-Date).AddMilliseconds($stepGapMilliseconds)
+}
+
 function Send-AntiIdleInput($accountName)
 {
     # Roblox kicks a client after 20 minutes without input, and it only counts input
@@ -1115,19 +1405,7 @@ function Send-AntiIdleInput($accountName)
 
     $previous = [Win32.Window]::GetForegroundWindow()                                 # give this back when done
 
-    [Win32.Window]::ShowWindow($handle, 9) | Out-Null                                 # SW_RESTORE, a minimised window cannot take focus
-    [Win32.Window]::SetForegroundWindow($handle) | Out-Null
-    Start-Sleep -Milliseconds 400
-
-    if ([Win32.Window]::GetForegroundWindow() -ne $handle)
-    {
-        # Windows refuses SetForegroundWindow unless the caller already owns the
-        # foreground; SwitchToThisWindow is not bound by that
-        [Win32.Window]::SwitchToThisWindow($handle, $true)
-        Start-Sleep -Milliseconds 400
-    }
-
-    if ([Win32.Window]::GetForegroundWindow() -ne $handle)
+    if (-not (Set-WindowFocused $handle))
     {
         # Retry in a minute rather than fighting for focus on every tick
         $session.LastInputAt = (Get-Date).AddMinutes(1 - $antiIdleMinutes)
@@ -1369,6 +1647,7 @@ function Update-SessionFromLog($session)
     if (-not $session.JoinedAt -and $text.Contains($joinMarker))
     {
         $session.JoinedAt = Get-Date
+        $session.StepsPending = $true                                                 # freshly in the game, so the setup may be due
     }
 
     $match = [regex]::Match($text, $disconnectPattern)                               # first disconnect line
@@ -1494,7 +1773,7 @@ foreach ($accountName in $allAccounts)
                                  LaunchUrl = $null; WindowSeenAt = $null; Paused = $false
                                  EverStarted = $false; AppliedRect = $null
                                  DropCount = 0; LastDropAt = $null; LastDropReason = $null
-                                 TotalUpSeconds = 0 }
+                                 TotalUpSeconds = 0; StepsPending = $false }
 }
 
 $globalPaused = $false
@@ -1724,6 +2003,20 @@ $logButton.Size = New-Object System.Drawing.Size(100, 30)
 Set-ThemedButton $logButton $false
 $statusForm.Controls.Add($logButton)
 
+# Runs the step list on main. Enabled only when there is a list and main is in the game.
+$runStepsButton = New-Object System.Windows.Forms.Button
+$runStepsButton.Text = "Run"
+$runStepsButton.Location = New-Object System.Drawing.Point(338, 468)
+$runStepsButton.Size = New-Object System.Drawing.Size(100, 30)
+$runStepsButton.Enabled = $false
+Set-ThemedButton $runStepsButton $false
+$statusForm.Controls.Add($runStepsButton)
+
+$runStepsButton.Add_Click({
+    if ($script:stepRun.Active) { Stop-StepRun "you pressed Stop"; return }
+    Start-StepRun "you pressed Run"
+})
+
 $exitButton = New-Object System.Windows.Forms.Button
 $exitButton.Text = "Exit"
 $exitButton.Location = New-Object System.Drawing.Point(450, 468)
@@ -1920,6 +2213,8 @@ $settingsButton.Add_Click({
     $script:discordPingId = $updated.DiscordPingId
     $script:discordSummaryMinutes = [int]$updated.DiscordSummaryMinutes
     $script:rememberWindowPositions = ($updated.RememberWindowPositions -ne "False")
+    $script:stepListText = $updated.StepList
+    $script:runStepsOnRejoin = ($updated.RunStepsOnRejoin -eq "True")
     if (-not $script:rememberWindowPositions -and (Test-Path $positionsPath))
     {
         # Turning it off forgets them, otherwise they would come back on re-ticking it
@@ -1992,6 +2287,18 @@ function Update-StatusUi
 
     $headline.Text = "$playing / $($allAccounts.Count) accounts playing"
     if ($script:globalPaused) { $headline.Text = $headline.Text + "   (paused)" }
+
+    $mainIsIn = ($sessions[$mainAccount].State -eq "Running" -and $sessions[$mainAccount].JoinedAt)
+    if ($script:stepRun.Active)
+    {
+        $runStepsButton.Enabled = $true
+        $runStepsButton.Text = "Stop $($script:stepRun.Index)/$($script:stepRun.Steps.Count)"
+    }
+    else
+    {
+        $runStepsButton.Enabled = ($stepListText -and $mainIsIn -and -not $script:globalPaused)
+        $runStepsButton.Text = "Run"
+    }
 
     $tileFreeRam.Text = "$script:lastFreeMegabytes MB"
     $tileStrays.Text = "$script:strayClosedCount"
@@ -2301,6 +2608,24 @@ function Invoke-SlowChecks
         Send-DiscordAlert "Status" $summary $color
     }
 
+    # Main has just got back into the game, so the one-off setup is due again. Either it
+    # runs itself, or you get told to go and do it, depending on the setting.
+    $mainSession = $sessions[$mainAccount]
+    if ($stepListText -and $mainSession.StepsPending -and $mainSession.State -eq "Running" -and $mainSession.JoinedAt)
+    {
+        $mainSession.StepsPending = $false
+        if ($runStepsOnRejoin)
+        {
+            Start-StepRun "$mainAccount rejoined"
+        }
+        else
+        {
+            Write-Log "$mainAccount is back in the game, the steps are waiting for you to press Run"
+            Send-DiscordAlert "Main is back in" ("It needs setting up again: walk into position and press Run in the " +
+                "watchdog window.") $alertAmber $true
+        }
+    }
+
     Complete-PendingWebhooks
 }
 
@@ -2324,6 +2649,19 @@ function Invoke-WatchdogTick
         {
             Register-LaunchFailure $accountName $_.Exception.Message
         }
+    }
+
+    # Also every tick, so the waits inside a sequence are honoured to the tick rather
+    # than to the ten second checks
+    try
+    {
+        if (-not $script:globalPaused) { Step-StepRun }
+        elseif ($script:stepRun.Active) { Stop-StepRun "paused" }
+    }
+    catch
+    {
+        Write-Log "WARNING: step run failed: $($_.Exception.Message)"
+        Stop-StepRun "it errored"
     }
 
     if (($script:tickCount % $slowTicksPerCheck) -eq 0)
