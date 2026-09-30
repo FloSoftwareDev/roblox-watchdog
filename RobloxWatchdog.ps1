@@ -1788,6 +1788,9 @@ function Get-SessionStatusText($accountName)
 
     if ($session.State -eq "Idle")
     {
+        # Said plainly, because otherwise a countdown sits at zero and looks stuck
+        if ($script:stepRun.Active -and $accountName -ne $mainAccount) { return "waiting for main's setup" }
+
         $waitSeconds = [int](($session.RelaunchAfter - (Get-Date)).TotalSeconds)
         # "relaunching" is only true once it has actually been up
         $verb = if ($session.EverStarted) { "relaunching" } else { "launching" }
@@ -2520,6 +2523,12 @@ function Invoke-SlowChecks
             break
         }
     }
+
+    # Nothing launches while main is running its steps. A client loading is far heavier
+    # than one already playing, and that is what makes the frame rate wobble, which is
+    # the one thing a timed walk cannot survive. Main gets the machine to itself until
+    # the sequence is done.
+    if ($script:stepRun.Active) { $launchInFlight = $true }
 
     foreach ($accountName in $allAccounts)
     {
