@@ -353,6 +353,125 @@ function Set-ThemedInput($control)
     $control.BorderStyle = "FixedSingle"
 }
 
+# ---- Win32 -------------------------------------------------------------------------
+
+# Up here rather than down with the watchdog: the settings dialog runs long before
+# that point, and its Pick button needs the cursor and key-state calls. Defined
+# later, clicking Pick threw "Get-WindowRectangle is not recognized".
+
+Add-Type -Namespace Win32 -Name Window -MemberDefinition @"
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+[DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int x, int y, int width, int height, bool repaint);
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool altTab);
+[DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+[DllImport("user32.dll")] public static extern uint MapVirtualKey(uint uCode, uint uMapType);
+[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+[DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+[DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key);
+"@
+
+# Separate block because it needs a struct, which -MemberDefinition cannot declare.
+# Used to read a window back after moving it: MoveWindow can report success while the
+# window has not actually budged.
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public struct RECT { public int Left, Top, Right, Bottom; }
+public struct POINT { public int X; public int Y; }
+public class WinPos
+{
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+    // Lives here rather than in the member-definition block above, which compiles on its
+    // own and cannot see a struct declared in a different Add-Type call
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
+}
+"@
+
+function Get-WindowRectangle($handle)
+{
+    $rect = New-Object RECT
+    if (-not [WinPos]::GetWindowRect($handle, [ref]$rect)) { return $null }
+    return [pscustomobject]@{ X = $rect.Left; Y = $rect.Top
+                              Width = ($rect.Right - $rect.Left); Height = ($rect.Bottom - $rect.Top) }
+}
+
+# ---- Step list parsing -------------------------------------------------------------
+
+# Up here because Test-Settings validates the step list, and that runs as soon as you
+# press Start, long before the watchdog functions below are defined.
+
+function Get-StepKeyCode($keyName, $lineNumber)
+{
+    if ($keyName.Length -eq 1 -and $keyName -match '[A-Za-z0-9]')
+    {
+        return [byte][char]([string]$keyName).ToUpper()
+    }
+    # The ones worth naming: movement and camera keys people actually hold down
+    $named = @{ space = 0x20; shift = 0x10; ctrl = 0x11; alt = 0x12; tab = 0x09; enter = 0x0D
+                esc = 0x1B; up = 0x26; down = 0x28; left = 0x25; right = 0x27 }
+    if ($named.ContainsKey($keyName.ToLower())) { return [byte]$named[$keyName.ToLower()] }
+    throw "line $lineNumber : '$keyName' is not a letter, a digit, or one of $(($named.Keys | Sort-Object) -join ', ')"
+}
+
+function Get-StepList($stepText)
+{
+    # One step per line. Anything unrecognised is reported rather than ignored, so a
+    # typo does not quietly turn into a sequence that clicks the wrong things.
+    $steps = New-Object System.Collections.Generic.List[object]
+    $lineNumber = 0
+    foreach ($line in ($stepText -split "`r?`n"))
+    {
+        $lineNumber++
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith("#")) { continue }
+
+        if ($trimmed -match '^key\s+(\S+)$')
+        {
+            $steps.Add([pscustomobject]@{ Kind = "key"; Key = (Get-StepKeyCode $Matches[1] $lineNumber) })
+        }
+        elseif ($trimmed -match '^hold\s+(\S+)\s+(\d{1,6})$')
+        {
+            # Expanded here into down, wait, up. The runner then only ever deals with
+            # instant steps, so a four second walk still costs one tick per step rather
+            # than blocking for four seconds.
+            $keyCode = Get-StepKeyCode $Matches[1] $lineNumber
+            $steps.Add([pscustomobject]@{ Kind = "keydown"; Key = $keyCode })
+            $steps.Add([pscustomobject]@{ Kind = "wait"; Milliseconds = [int]$Matches[2] })
+            $steps.Add([pscustomobject]@{ Kind = "keyup"; Key = $keyCode })
+        }
+        elseif ($trimmed -match '^scroll\s+(-?\d{1,3})$')
+        {
+            $clicks = [int]$Matches[1]
+            if ($clicks -eq 0 -or [math]::Abs($clicks) -gt 50)
+            {
+                throw "line $lineNumber : scroll needs a number of clicks between -50 and 50, not 0"
+            }
+            $steps.Add([pscustomobject]@{ Kind = "scroll"; Clicks = $clicks })
+        }
+        elseif ($trimmed -match '^click\s+([0-9]*\.?[0-9]+)\s*,\s*([0-9]*\.?[0-9]+)$')
+        {
+            $fractionX = [double]$Matches[1]
+            $fractionY = [double]$Matches[2]
+            if ($fractionX -lt 0 -or $fractionX -gt 1 -or $fractionY -lt 0 -or $fractionY -gt 1)
+            {
+                throw "line $lineNumber : click needs fractions of the window between 0 and 1"
+            }
+            $steps.Add([pscustomobject]@{ Kind = "click"; X = $fractionX; Y = $fractionY })
+        }
+        elseif ($trimmed -match '^wait\s+(\d{1,6})$')
+        {
+            $steps.Add([pscustomobject]@{ Kind = "wait"; Milliseconds = [int]$Matches[1] })
+        }
+        else
+        {
+            throw "line $lineNumber : '$trimmed' is not one of 'key X', 'hold X ms', 'click x,y', 'scroll n' or 'wait ms'"
+        }
+    }
+    return $steps
+}
+
 # ---- Settings window ---------------------------------------------------------------
 
 function Protect-Secret($plainText)
@@ -961,36 +1080,6 @@ function Get-SessionProcess($session)
     return $process
 }
 
-Add-Type -Namespace Win32 -Name Window -MemberDefinition @"
-[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-[DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int x, int y, int width, int height, bool repaint);
-[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-[DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool altTab);
-[DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
-[DllImport("user32.dll")] public static extern uint MapVirtualKey(uint uCode, uint uMapType);
-[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
-[DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
-[DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key);
-"@
-
-# Separate block because it needs a struct, which -MemberDefinition cannot declare.
-# Used to read a window back after moving it: MoveWindow can report success while the
-# window has not actually budged.
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public struct RECT { public int Left, Top, Right, Bottom; }
-public struct POINT { public int X; public int Y; }
-public class WinPos
-{
-    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
-    // Lives here rather than in the member-definition block above, which compiles on its
-    // own and cannot see a struct declared in a different Add-Type call
-    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
-}
-"@
-
 function Get-TilingScreens
 {
     # Primary first so main keeps slot 0 on the screen you actually look at, then the
@@ -1042,14 +1131,6 @@ function Save-WindowPosition($accountName, $rectangleText)
     {
         Write-Log "WARNING: could not save the window position for $accountName : $($_.Exception.Message)"
     }
-}
-
-function Get-WindowRectangle($handle)
-{
-    $rect = New-Object RECT
-    if (-not [WinPos]::GetWindowRect($handle, [ref]$rect)) { return $null }
-    return [pscustomobject]@{ X = $rect.Left; Y = $rect.Top
-                              Width = ($rect.Right - $rect.Left); Height = ($rect.Bottom - $rect.Top) }
 }
 
 function Get-SlotRectangle($slotIndex)
@@ -1243,76 +1324,6 @@ function Set-WindowFocused($handle)
 }
 
 # ---- Step list ---------------------------------------------------------------------
-
-function Get-StepKeyCode($keyName, $lineNumber)
-{
-    if ($keyName.Length -eq 1 -and $keyName -match '[A-Za-z0-9]')
-    {
-        return [byte][char]([string]$keyName).ToUpper()
-    }
-    # The ones worth naming: movement and camera keys people actually hold down
-    $named = @{ space = 0x20; shift = 0x10; ctrl = 0x11; alt = 0x12; tab = 0x09; enter = 0x0D
-                esc = 0x1B; up = 0x26; down = 0x28; left = 0x25; right = 0x27 }
-    if ($named.ContainsKey($keyName.ToLower())) { return [byte]$named[$keyName.ToLower()] }
-    throw "line $lineNumber : '$keyName' is not a letter, a digit, or one of $(($named.Keys | Sort-Object) -join ', ')"
-}
-
-function Get-StepList($stepText)
-{
-    # One step per line. Anything unrecognised is reported rather than ignored, so a
-    # typo does not quietly turn into a sequence that clicks the wrong things.
-    $steps = New-Object System.Collections.Generic.List[object]
-    $lineNumber = 0
-    foreach ($line in ($stepText -split "`r?`n"))
-    {
-        $lineNumber++
-        $trimmed = $line.Trim()
-        if (-not $trimmed -or $trimmed.StartsWith("#")) { continue }
-
-        if ($trimmed -match '^key\s+(\S+)$')
-        {
-            $steps.Add([pscustomobject]@{ Kind = "key"; Key = (Get-StepKeyCode $Matches[1] $lineNumber) })
-        }
-        elseif ($trimmed -match '^hold\s+(\S+)\s+(\d{1,6})$')
-        {
-            # Expanded here into down, wait, up. The runner then only ever deals with
-            # instant steps, so a four second walk still costs one tick per step rather
-            # than blocking for four seconds.
-            $keyCode = Get-StepKeyCode $Matches[1] $lineNumber
-            $steps.Add([pscustomobject]@{ Kind = "keydown"; Key = $keyCode })
-            $steps.Add([pscustomobject]@{ Kind = "wait"; Milliseconds = [int]$Matches[2] })
-            $steps.Add([pscustomobject]@{ Kind = "keyup"; Key = $keyCode })
-        }
-        elseif ($trimmed -match '^scroll\s+(-?\d{1,3})$')
-        {
-            $clicks = [int]$Matches[1]
-            if ($clicks -eq 0 -or [math]::Abs($clicks) -gt 50)
-            {
-                throw "line $lineNumber : scroll needs a number of clicks between -50 and 50, not 0"
-            }
-            $steps.Add([pscustomobject]@{ Kind = "scroll"; Clicks = $clicks })
-        }
-        elseif ($trimmed -match '^click\s+([0-9]*\.?[0-9]+)\s*,\s*([0-9]*\.?[0-9]+)$')
-        {
-            $fractionX = [double]$Matches[1]
-            $fractionY = [double]$Matches[2]
-            if ($fractionX -lt 0 -or $fractionX -gt 1 -or $fractionY -lt 0 -or $fractionY -gt 1)
-            {
-                throw "line $lineNumber : click needs fractions of the window between 0 and 1"
-            }
-            $steps.Add([pscustomobject]@{ Kind = "click"; X = $fractionX; Y = $fractionY })
-        }
-        elseif ($trimmed -match '^wait\s+(\d{1,6})$')
-        {
-            $steps.Add([pscustomobject]@{ Kind = "wait"; Milliseconds = [int]$Matches[1] })
-        }
-        else
-        {
-            throw "line $lineNumber : '$trimmed' is not 'key X', 'click x,y' or 'wait ms'"
-        }
-    }
-    return $steps
-}
 
 function Start-StepRun($reason)
 {
