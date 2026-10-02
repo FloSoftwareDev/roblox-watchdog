@@ -11,7 +11,7 @@ relogs alts every X minutes so they don't go stale (main is never relogged)
 keeps the clients awake so Roblox doesn't kick them for being idle
 caps Roblox's frame rate so the clients don't eat your CPU rendering frames nobody looks at
 tiles all the windows so they don't stack, spread over all your monitors, and puts them back where you dragged them
-if your PC runs low on RAM, it closes the heaviest alt instead of letting everything freeze
+if your PC runs low on RAM, it closes the heaviest alt instead of letting everything freeze (or set it to 0 and it won't)
 clears out the leftover Roblox processes that pile up in Task Manager
 tells you on Discord when something actually needs you
 starts itself again if it crashes
@@ -88,6 +88,14 @@ On a 2560x1440 plus a 1920x1080, six accounts go from 853x700 each to four at 12
 Drag a window somewhere and that's where that account goes from then on, instead of back into the grid. Roblox nudging its own window by a few pixels doesn't count as you moving it. Untick "Put windows back where I dragged them" to go back to the grid and forget the saved spots.
 
 Untick "Spread the windows over all monitors" to keep everything on the main screen, which is handy if you are recording or want the second screen for something else.
+
+about closing alts for memory
+
+"Kill an alt below free MB" closes the heaviest alt when free memory drops under it, so the machine doesn't grind to a halt. Main is never closed.
+
+Set it to 0 if you don't want that at all. If your PC sits at full memory the whole time anyway, having an alt closed is worse than just letting it run, and 0 turns it off completely.
+
+It also won't close more than one alt every two minutes. A closing client takes a while to hand its memory back, and the check runs every ten seconds, so without that gap a machine that stays low would close one alt after another until there were none left.
 
 about stuck clients and strays
 

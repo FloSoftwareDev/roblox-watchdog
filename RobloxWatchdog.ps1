@@ -55,6 +55,7 @@ $ignoredDisconnectReasons = @()                                                 
 $joinMarker = "Connection accepted"                                                  # logged only once the client is really in the game
 $joinTimeoutSeconds = 150                                                            # no join by then means it is stuck on an error screen
 $joinedMemoryBytes = 1GB                                                             # in-game clients sit on 3 GB, stuck ones on about 170 MB
+$memoryKillCooldownSeconds = 120                                                     # long enough for a closed client to hand its memory back
 $httpClient = New-Object System.Net.Http.HttpClient
 $httpClient.Timeout = [TimeSpan]::FromSeconds(15)                                    # never let a hung RAM freeze the watchdog
 
@@ -534,7 +535,7 @@ function Show-SettingsWindow($saved)
     Add-Row "Private server link (optional)" "PrivateServerLink" 20 $false
     Add-Row "RAM web server port" "AccountManagerPort" 20 $false
     Add-Row "RAM web server password" "AccountManagerPassword" 20 $true
-    Add-Row "Kill an alt below free MB" "MinimumFreeMegabytes" 20 $false
+    Add-Row "Kill an alt below free MB (0=off)" "MinimumFreeMegabytes" 20 $false
     Add-Row "Seconds between launches" "RelaunchDelaySeconds" 20 $false
     Add-Row "Relog alts after minutes" "MaximumSessionMinutes" 20 $false
     Add-Row "Frame rate cap (0=off)" "FramerateCap" 20 $false
@@ -794,7 +795,13 @@ function Test-Settings($settings)
     {
         if ($settings[$key] -notmatch '^\d{1,9}$') { throw "$key must be a number" }
     }
-    if ([int]$settings.MinimumFreeMegabytes -lt 100) { throw "Kill an alt below free MB must be at least 100" }
+    # 0 turns it off, for machines that sit at full memory all the time where closing an
+    # alt every ten seconds is worse than letting it run
+    $freeMegabytesSetting = [int]$settings.MinimumFreeMegabytes
+    if ($freeMegabytesSetting -ne 0 -and $freeMegabytesSetting -lt 100)
+    {
+        throw "Kill an alt below free MB must be 0, or at least 100"
+    }
     if ([int]$settings.RelaunchDelaySeconds -lt 5)   { throw "Seconds between launches must be at least 5" }
     if ([int]$settings.MaximumSessionMinutes -lt 5)  { throw "Relog alts after minutes must be at least 5" }
 
@@ -1876,6 +1883,7 @@ $strayClosedCount = 0
 $lastDisconnectAt = $null
 $lastFreeMegabytes = 0
 $lowMemoryAlerted = $false
+$lastMemoryKillAt = $null
 $lastSummaryAt = Get-Date
 $watchdogStartedAt = Get-Date
 $tickCount = 0
@@ -1894,7 +1902,14 @@ else
     Write-Log "WARNING: running RAM as administrator."
 }
 Set-RobloxFramerateCap
-Write-Log "will kill the largest alt below $minimumFreeMegabytes MB available (now $([int](Get-FreeMegabytes)) MB)"
+if ($minimumFreeMegabytes -gt 0)
+{
+    Write-Log "will kill the largest alt below $minimumFreeMegabytes MB available (now $([int](Get-FreeMegabytes)) MB)"
+}
+else
+{
+    Write-Log "will not kill alts over memory (now $([int](Get-FreeMegabytes)) MB available)"
+}
 
 # A running client is adopted as main; everything else is untracked and closed
 $runningMain = Get-RobloxClients | Sort-Object StartTime | Select-Object -First 1
@@ -2493,7 +2508,15 @@ function Invoke-SlowChecks
             $freeMegabytes = Get-FreeMegabytes
             $script:lastFreeMegabytes = [int]$freeMegabytes
             if ($freeMegabytes -ge $minimumFreeMegabytes) { $script:lowMemoryAlerted = $false }
-            if ($freeMegabytes -lt $minimumFreeMegabytes)
+
+            # A closing client takes a while to hand its memory back, and the check runs
+            # every ten seconds, so without a gap a machine that stays low closes one alt
+            # after another until there are none left. One at a time, then wait and look
+            # again.
+            $killCooldownOver = (-not $script:lastMemoryKillAt) -or
+                                (((Get-Date) - $script:lastMemoryKillAt).TotalSeconds -ge $memoryKillCooldownSeconds)
+
+            if ($minimumFreeMegabytes -gt 0 -and $freeMegabytes -lt $minimumFreeMegabytes -and $killCooldownOver)
             {
                 $largestAlt = Get-RobloxClients |
                     Where-Object { $_.Id -ne $sessions[$mainAccount].ProcessId } |
@@ -2503,7 +2526,9 @@ function Invoke-SlowChecks
                 if ($largestAlt)
                 {
                     Stop-Process -Id $largestAlt.Id -Force -ErrorAction SilentlyContinue
-                    Write-Log "killed PID $($largestAlt.Id) ($([int]($largestAlt.WorkingSet64 / 1MB)) MB), free was $([int]$freeMegabytes) MB"
+                    $script:lastMemoryKillAt = Get-Date
+                    Write-Log ("killed PID $($largestAlt.Id) ($([int]($largestAlt.WorkingSet64 / 1MB)) MB), free was " +
+                               "$([int]$freeMegabytes) MB, not closing another for $memoryKillCooldownSeconds s")
                 }
                 else
                 {
