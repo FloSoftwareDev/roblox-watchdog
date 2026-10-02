@@ -54,6 +54,7 @@ $disconnectPattern = "Sending disconnect with reason: (\d+)"                    
 $ignoredDisconnectReasons = @()                                                      # e.g. @("285") to ignore a normal leave/teleport
 $joinMarker = "Connection accepted"                                                  # logged only once the client is really in the game
 $joinTimeoutSeconds = 150                                                            # no join by then means it is stuck on an error screen
+$joinedMemoryBytes = 1GB                                                             # in-game clients sit on 3 GB, stuck ones on about 170 MB
 $httpClient = New-Object System.Net.Http.HttpClient
 $httpClient.Timeout = [TimeSpan]::FromSeconds(15)                                    # never let a hung RAM freeze the watchdog
 
@@ -1578,7 +1579,8 @@ function Step-FindingLog($accountName)
     $session = $sessions[$accountName]
     $takenPaths = @($sessions.Values | ForEach-Object { $_.LogPath })
     $logFile = Get-PlayerLogFiles |
-        Where-Object { $_.CreationTime -ge $session.LaunchedAt -and $takenPaths -notcontains $_.FullName } |
+        Where-Object { $_.CreationTime -ge $session.LaunchedAt -and $takenPaths -notcontains $_.FullName -and
+                       -not (Test-IsStarterStub $_.FullName) } |
         Sort-Object CreationTime |
         Select-Object -First 1
 
@@ -1602,11 +1604,21 @@ function Step-FindingLog($accountName)
 
     if (((Get-Date) - $session.StateSince).TotalSeconds -gt $logTimeoutSeconds)
     {
-        # Don't leave a half-started client running untracked
-        Stop-Process -Id $session.ProcessId -Force -ErrorAction SilentlyContinue
-        $session.ProcessId = 0
-        $session.ProcessStartTime = $null
-        throw "no new *_Player_*.log appeared within $logTimeoutSeconds s"
+        # A warm start reuses an existing session, so there may be no new log to find and
+        # killing the client over it would be throwing away something that works. The
+        # session carries on without one: disconnects then come from the process going
+        # away and being in the game comes from memory, which is less detail but true.
+        Write-Log "WARNING: no new log appeared for $accountName within $logTimeoutSeconds s, carrying on without one (no disconnect codes for this session)"
+        $session.LogPath = $null
+        $session.LogOffset = 0
+        $session.StartedAt = Get-Date
+        $session.JoinedAt = $null
+        $session.LastInputAt = Get-Date
+        $session.WindowSeenAt = $null
+        $session.EverStarted = $true
+        Update-LaunchQueue $relaunchDelaySeconds
+        Set-SessionState $session "Tiling"
+        return
     }
 }
 
@@ -1647,6 +1659,26 @@ function Step-Tiling($accountName)
 function Get-PlayerLogFiles
 {
     Get-ChildItem $logFolder -Filter "*_Player_*.log" -ErrorAction Stop
+}
+
+function Test-IsStarterStub($path)
+{
+    # Roblox 0.741 warm-starts: a launch can hand off to an existing client, write a
+    # handful of lines and end with the starter being destroyed. That file never mentions
+    # joining or disconnecting, so attaching to it means watching nothing.
+    try
+    {
+        if ((Get-Item $path).Length -gt 64KB) { return $false }
+        foreach ($line in (Get-Content $path -Tail 3 -ErrorAction Stop))
+        {
+            if ($line -like "*RobloxStarter destroyed*") { return $true }
+        }
+        return $false
+    }
+    catch
+    {
+        return $false
+    }
 }
 
 function Find-StartupLogFile($process)
@@ -2559,29 +2591,55 @@ function Invoke-SlowChecks
                 {
                     Stop-Session $accountName "is gone"
                 }
-                elseif ($session.LogPath)
+                else
                 {
-                    $disconnectReason = Update-SessionFromLog $session                # $null = still connected
-                    if ($disconnectReason)
+                    if ($session.LogPath)
                     {
-                        $script:lastDisconnectAt = Get-Date
-                        $session.DropCount++
-                        $session.LastDropAt = Get-Date
-                        $session.LastDropReason = $disconnectReason
-                        $droppedThisPass.Add("$accountName (reason $disconnectReason)")
-                        if ($accountName -eq $mainAccount) { $mainDroppedThisPass = $true }
-                        Stop-Session $accountName "disconnected (reason $disconnectReason)"
+                        $disconnectReason = Update-SessionFromLog $session            # $null = still connected
+                        if ($disconnectReason)
+                        {
+                            $script:lastDisconnectAt = Get-Date
+                            $session.DropCount++
+                            $session.LastDropAt = Get-Date
+                            $session.LastDropReason = $disconnectReason
+                            $droppedThisPass.Add("$accountName (reason $disconnectReason)")
+                            if ($accountName -eq $mainAccount) { $mainDroppedThisPass = $true }
+                            Stop-Session $accountName "disconnected (reason $disconnectReason)"
+                        }
                     }
-                    elseif (-not $session.JoinedAt -and $session.StartedAt -and
-                            ((Get-Date) - $session.StartedAt).TotalSeconds -gt $joinTimeoutSeconds)
+
+                    # Deliberately outside the log check: a session with no usable log
+                    # still needs to know whether it got into the game
+                    if ($session.State -eq "Running" -and -not $session.JoinedAt -and $session.StartedAt -and
+                        ((Get-Date) - $session.StartedAt).TotalSeconds -gt $joinTimeoutSeconds)
                     {
-                        # It launched and has a window, but never got into the game: it is
-                        # sitting on a "failed to connect" screen, which no disconnect code
-                        # is ever written for, so nothing else would notice it
-                        Stop-Session $accountName "never joined the game within $joinTimeoutSeconds s (stuck on an error screen)"
+                        # The log is not the only evidence, and trusting it alone killed a
+                        # healthy client. Roblox 0.741 warm-starts clients: a launch can
+                        # hand off to an existing session and destroy its starter, leaving
+                        # a stub log that never mentions joining. Memory settles it. An
+                        # in-game client sits on gigabytes; one stuck on an error screen
+                        # never gets past a few hundred megabytes.
+                        $liveProcess = Get-SessionProcess $session
+                        if ($liveProcess -and $liveProcess.WorkingSet64 -ge $joinedMemoryBytes)
+                        {
+                            $session.JoinedAt = Get-Date
+                            # Set here as well as in the log reader, or a warm-started main
+                            # would never trigger its setup sequence
+                            $session.StepsPending = $true
+                            Write-Log ("$accountName has no join line in its log but is using " +
+                                       "$([int]($liveProcess.WorkingSet64 / 1MB)) MB, so it is in the game")
+                        }
+                        else
+                        {
+                            # Launched and has a window, but never got in: sitting on a
+                            # "failed to connect" screen, which no disconnect code is ever
+                            # written for, so nothing else would notice it
+                            Stop-Session $accountName "never joined the game within $joinTimeoutSeconds s (stuck on an error screen)"
+                        }
                     }
-                    elseif ($accountName -ne $mainAccount -and $session.StartedAt -and
-                            ((Get-Date) - $session.StartedAt).TotalMinutes -gt $maximumSessionMinutes)
+
+                    if ($session.State -eq "Running" -and $accountName -ne $mainAccount -and $session.StartedAt -and
+                        ((Get-Date) - $session.StartedAt).TotalMinutes -gt $maximumSessionMinutes)
                     {
                         Stop-Session $accountName "is older than $maximumSessionMinutes min"
                     }
