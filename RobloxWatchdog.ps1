@@ -1222,13 +1222,16 @@ function Set-WindowFocused($handle)
     # Roblox only counts input while its window has focus, so anything that sends input
     # has to get it first. Windows refuses SetForegroundWindow unless the caller already
     # owns the foreground, and SwitchToThisWindow is not bound by that.
+    # 400ms, which is what anti-idle used before this was pulled out into a shared
+    # helper. Extracting it quietly halved the wait, and focus timing is finicky enough
+    # that there was no reason to.
     [Win32.Window]::ShowWindow($handle, 9) | Out-Null                                 # SW_RESTORE, a minimised window cannot take focus
     [Win32.Window]::SetForegroundWindow($handle) | Out-Null
-    Start-Sleep -Milliseconds 250
+    Start-Sleep -Milliseconds 400
     if ([Win32.Window]::GetForegroundWindow() -eq $handle) { return $true }
 
     [Win32.Window]::SwitchToThisWindow($handle, $true)
-    Start-Sleep -Milliseconds 250
+    Start-Sleep -Milliseconds 400
     return ([Win32.Window]::GetForegroundWindow() -eq $handle)
 }
 
