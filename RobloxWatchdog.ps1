@@ -904,10 +904,23 @@ function Test-Settings($settings)
     }
     if ($settings.AccountManagerPassword.Length -lt 6) { throw "RAM password must match the Webserver Password in RAM (RAM requires 6+ characters for LaunchAccount)" }
 
-    # The link is handed straight to RAM, so only accept a real Roblox one
-    if ($settings.PrivateServerLink -and $settings.PrivateServerLink -notmatch '^https://(www\.)?roblox\.com/')
+    # The link is handed straight to RAM, which turns it into a private game join. Any
+    # other Roblox url used to be accepted here, and a plain game link looks close enough
+    # to paste by mistake: it then joins with no permission and the client shows error
+    # 524, over and over, which is a miserable thing to debug from the other end.
+    if ($settings.PrivateServerLink)
     {
-        throw "Private server link must start with https://www.roblox.com/ (paste the full share link)"
+        $shareLink = $settings.PrivateServerLink -match '^https://(www\.)?roblox\.com/share\?.*\bcode=[A-Za-z0-9_-]+' -and
+                     $settings.PrivateServerLink -match 'type=Server'
+        $classicLink = $settings.PrivateServerLink -match '^https://(www\.)?roblox\.com/games/\d+.*[?&]privateServerLinkCode=[A-Za-z0-9_-]+'
+        if (-not ($shareLink -or $classicLink))
+        {
+            throw ("Private server link must be a private server link, not an ordinary game link.`r`n`r`n" +
+                   "Either of these is fine:`r`n" +
+                   "  https://www.roblox.com/share?code=...&type=Server`r`n" +
+                   "  https://www.roblox.com/games/<id>/...?privateServerLinkCode=...`r`n`r`n" +
+                   "In Roblox, open the private server and use its invite link. Leave this empty to join a public server.")
+        }
     }
 
     foreach ($key in "MinimumFreeMegabytes", "RelaunchDelaySeconds", "MaximumSessionMinutes")
@@ -1756,6 +1769,7 @@ function Update-SessionFromLog($session)
     if (-not $session.JoinedAt -and $text.Contains($joinMarker))
     {
         $session.JoinedAt = Get-Date
+        $session.NeverJoinedCount = 0
         $session.StepsPending = $true                                                 # freshly in the game, so the setup may be due
     }
 
@@ -1885,7 +1899,7 @@ foreach ($accountName in $allAccounts)
                                  LaunchUrl = $null; WindowSeenAt = $null; Paused = $false
                                  EverStarted = $false; AppliedRect = $null
                                  DropCount = 0; LastDropAt = $null; LastDropReason = $null
-                                 TotalUpSeconds = 0; StepsPending = $false }
+                                 TotalUpSeconds = 0; StepsPending = $false; NeverJoinedCount = 0 }
 }
 
 $globalPaused = $false
@@ -2662,6 +2676,7 @@ function Invoke-SlowChecks
                         if ($liveProcess -and $liveProcess.WorkingSet64 -ge $joinedMemoryBytes)
                         {
                             $session.JoinedAt = Get-Date
+                            $session.NeverJoinedCount = 0
                             # Set here as well as in the log reader, or a warm-started main
                             # would never trigger its setup sequence
                             $session.StepsPending = $true
@@ -2673,7 +2688,27 @@ function Invoke-SlowChecks
                             # Launched and has a window, but never got in: sitting on a
                             # "failed to connect" screen, which no disconnect code is ever
                             # written for, so nothing else would notice it
+                            $session.NeverJoinedCount++
                             Stop-Session $accountName "never joined the game within $joinTimeoutSeconds s (stuck on an error screen)"
+
+                            # A join that fails for a reason relaunching cannot fix, a
+                            # wrong private server link being the usual one, used to retry
+                            # at full speed for ever. It backs off like a failed launch
+                            # does, and says so once rather than silently churning.
+                            if ($session.NeverJoinedCount -ge 2)
+                            {
+                                $backoffSeconds = [math]::Min($relaunchDelaySeconds * $session.NeverJoinedCount, 600)
+                                $session.RelaunchAfter = (Get-Date).AddSeconds($backoffSeconds)
+                                Write-Log "$accountName has failed to join $($session.NeverJoinedCount) times in a row, next try in $backoffSeconds s"
+                            }
+                            if ($session.NeverJoinedCount -eq $maximumLaunchFailures)
+                            {
+                                Write-Log "ERROR: $accountName keeps launching but never joining, check the private server link and that this account can join it"
+                                Send-DiscordAlert "$accountName cannot join" ("It has launched and failed to get into the game " +
+                                    "$maximumLaunchFailures times. The client is probably showing a join error such as 524, " +
+                                    "which usually means the private server link is wrong or this account is not allowed in " +
+                                    "that server.") $alertRed ($accountName -eq $mainAccount)
+                            }
                         }
                     }
 
