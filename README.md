@@ -33,6 +33,8 @@ Start your main account first
 Fill in: alt usernames (one per line), place ID, private server link (paste the full share link), RAM port + password, and the limits
 Hit start and go touch grass
 
+The usernames have to match the accounts in RAM exactly, capitals included. RAM answers an unknown name with "Invalid Account" and nothing launches, so if an account never starts, check for a digit 1 where there should be a letter l, or an O where there should be a 0. The window and the log now say so instead of leaving you guessing.
+
 heads up: by default it closes any other Roblox windows besides your main when it starts. Untick "Close other Roblox windows on start" if you don't want that.
 
 also: it works out which client is your main by taking the oldest one that's already running. If you start it with an alt open and your main closed, that alt gets treated as main, which means it never gets relogged and never gets closed to free memory. There is no way to ask a running client which account it is, so if that matters, close everything before starting.

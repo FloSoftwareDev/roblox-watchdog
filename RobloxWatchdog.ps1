@@ -25,6 +25,11 @@
 #                                         tick een stap zet, zodat het venster niet vastloopt tijdens een launch. Tray-icoon,
 #                                         pauzeknop, accounts los herstarten en een zichtbare melding als rechten ontbreken.
 #                                         De accounts worden nu naar schermoppervlak over alle monitoren verdeeld.
+# 007          04-10-2026 Miniwar AFK FG  RAM weigert een launch met een tekst in het antwoord in plaats van met een
+#                                         statuscode. Die tekst werd weggegooid, waardoor een geweigerde launch 90
+#                                         seconden op een venster wachtte dat nooit kwam en daarna eindeloos opnieuw
+#                                         probeerde zonder uitleg. Nu stopt de launch direct met de melding van RAM
+#                                         erbij, en het statusvenster laat de laatste foutmelding per account zien.
 #
 #------------------------------------------------------------------------------------#
 
@@ -1545,6 +1550,28 @@ function Invoke-AccountManager($url)
     }
     $reply = "$([int]$response.StatusCode) '$($response.ReasonPhrase)' $body"         # status + text for logs
     Write-Log "RAM replied: $reply"
+
+    # RAM answers LaunchAccount with 400 whether or not it worked, so the status code says
+    # nothing. The body does. Across 1613 launches in one log, every empty body was
+    # followed by a client starting, with no exceptions, and a non-empty body is RAM
+    # refusing: "Invalid Account" when the name is not one it holds. That used to be
+    # thrown away, so a refused launch sat for 90 seconds waiting for a window that was
+    # never coming, then retried for ever with nothing explaining why.
+    $message = "$body".Trim()
+    if ($message)
+    {
+        $hint = ""
+        if ($message -match '(?i)account')
+        {
+            $hint = ". The username has to match the account in RAM exactly, including capitals, " +
+                    "and watch for a digit 1 where there should be a letter l"
+        }
+        elseif ($message -match '(?i)password')
+        {
+            $hint = ". That is the Webserver Password from RAM's Settings > Developer, not an account password"
+        }
+        throw "RAM refused it: $message$hint"
+    }
     return $reply
 }
 
@@ -1834,6 +1861,7 @@ function Register-LaunchFailure($accountName, $message)
     # an account that cannot start yet keeps being retried
     $session = $sessions[$accountName]
     $session.FailureCount++
+    $session.LastFailureReason = $message
     $backoffSeconds = [math]::Min($relaunchDelaySeconds * $session.FailureCount, 600)
     $session.RelaunchAfter = (Get-Date).AddSeconds($backoffSeconds)
     Set-SessionState $session "Idle"
@@ -1899,7 +1927,8 @@ foreach ($accountName in $allAccounts)
                                  LaunchUrl = $null; WindowSeenAt = $null; Paused = $false
                                  EverStarted = $false; AppliedRect = $null
                                  DropCount = 0; LastDropAt = $null; LastDropReason = $null
-                                 TotalUpSeconds = 0; StepsPending = $false; NeverJoinedCount = 0 }
+                                 TotalUpSeconds = 0; StepsPending = $false; NeverJoinedCount = 0
+                                 LastFailureReason = $null }
 }
 
 $globalPaused = $false
@@ -2243,6 +2272,7 @@ $relaunchButton.Add_Click({
             Stop-Session $accountName "relaunch asked for from the window"
         }
         $session.FailureCount = 0
+        $session.LastFailureReason = $null
         $session.Paused = $false
         $session.RelaunchAfter = (Get-Date).AddSeconds($relaunchDelaySeconds * $queuePosition)
         $queuePosition++
@@ -2475,7 +2505,13 @@ function Update-StatusUi
         {
             $parts.Add("no drops yet")
         }
-        if ($detailSession.FailureCount -gt 0) { $parts.Add("$($detailSession.FailureCount) failed launches") }
+        if ($detailSession.FailureCount -gt 0)
+        {
+            $parts.Add("$($detailSession.FailureCount) failed launch$(if ($detailSession.FailureCount -ne 1) { 'es' })")
+            # Shown here as well as in the log, because an account that never starts at all
+            # has no drops and no uptime, so the reason was the one thing the window did not say
+            if ($detailSession.LastFailureReason) { $parts.Add($detailSession.LastFailureReason) }
+        }
 
         # Written as escapes, not literal characters: the file has no BOM, so PowerShell
         # 5.1 reads it as ANSI and a literal middle dot would come out as mojibake
