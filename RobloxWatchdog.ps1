@@ -30,6 +30,15 @@
 #                                         seconden op een venster wachtte dat nooit kwam en daarna eindeloos opnieuw
 #                                         probeerde zonder uitleg. Nu stopt de launch direct met de melding van RAM
 #                                         erbij, en het statusvenster laat de laatste foutmelding per account zien.
+# 008          04-10-2026 Miniwar AFK FG  Het spel teleporteert spelers tussen rondes: de client verlaat de server, logt
+#                                         een disconnect en komt vijf seconden later op diezelfde server terug, in
+#                                         hetzelfde proces. Dat werd als een drop gelezen en de gezonde client werd
+#                                         gesloten en opnieuw gestart: 728 van de 785 disconnects in het logbestand.
+#                                         Nu wordt gewacht of de client zelf terugkomt op dezelfde server, en wordt
+#                                         alleen herstart als dat niet gebeurt. Een verdwenen proces is ook geen bewijs
+#                                         meer: een warm gestarte sessie wordt overgenomen in plaats van herstart, en
+#                                         anders wel geteld en gemeld. Een sessie zonder logbestand zoekt nu door tot
+#                                         hij er een heeft, want zonder logbestand ziet de watchdog niets.
 #
 #------------------------------------------------------------------------------------#
 
@@ -56,8 +65,11 @@ $stepRun = @{ Active = $false; Steps = @(); Index = 0; NextAt = $null; Reason = 
 $maximumLaunchFailures = 5                                                           # log loudly after this many failed launches in a row
 $logFolder = Join-Path $env:LOCALAPPDATA "Roblox\logs"                              # Roblox client log files
 $disconnectPattern = "Sending disconnect with reason: (\d+)"                         # logged on drop (277) and leave (285)
-$ignoredDisconnectReasons = @()                                                      # e.g. @("285") to ignore a normal leave/teleport
+$ignoredDisconnectReasons = @()                                                      # never acted on at all; a teleport is recognised, not listed here
 $joinMarker = "Connection accepted"                                                  # logged only once the client is really in the game
+$joinAddressPattern = "Connection accepted from ([0-9.]+\|[0-9]+)"                   # the server it joined, so a rejoin can be compared with it
+$rejoinGraceSeconds = 30                                                             # a teleport is back in about 5 s, so this is plenty
+$logLivenessSeconds = 120                                                            # a log written more recently than this belongs to a live client
 $joinTimeoutSeconds = 150                                                            # no join by then means it is stuck on an error screen
 $joinedMemoryBytes = 1GB                                                             # in-game clients sit on 3 GB, stuck ones on about 170 MB
 $memoryKillCooldownSeconds = 120                                                     # long enough for a closed client to hand its memory back
@@ -1651,6 +1663,8 @@ function Step-FindingLog($accountName)
         $session.LogOffset = 0
         $session.StartedAt = Get-Date
         $session.JoinedAt = $null                                                     # not in the game until the log says so
+        $session.ServerAddress = $null                                                # read from the log's first join line
+        $session.PendingDrop = $null
         $session.LastInputAt = Get-Date                                               # joining counts as input
         $session.WindowSeenAt = $null
         $session.EverStarted = $true
@@ -1674,6 +1688,8 @@ function Step-FindingLog($accountName)
         $session.LogOffset = 0
         $session.StartedAt = Get-Date
         $session.JoinedAt = $null
+        $session.ServerAddress = $null
+        $session.PendingDrop = $null
         $session.LastInputAt = Get-Date
         $session.WindowSeenAt = $null
         $session.EverStarted = $true
@@ -1719,7 +1735,11 @@ function Step-Tiling($accountName)
 
 function Get-PlayerLogFiles
 {
-    Get-ChildItem $logFolder -Filter "*_Player_*.log" -ErrorAction Stop
+    # Roblox's crash handler writes its own file that matches this filter as well. It
+    # never mentions joining or disconnecting, so attaching to one would mean watching
+    # nothing happen for the rest of the session.
+    Get-ChildItem $logFolder -Filter "*_Player_*.log" -ErrorAction Stop |
+        Where-Object { $_.Name -notlike "*CrashHandler*" }
 }
 
 function Test-IsStarterStub($path)
@@ -1788,10 +1808,14 @@ function Read-NewLogText($session)
 
 function Update-SessionFromLog($session)
 {
-    # One read per tick, because the offset only moves forward and both checks share it.
-    # Returns the Roblox disconnect code (e.g. 277, 285), or $null while still connected,
-    # and records the moment the client actually got into the game.
+    # One read per tick, because the offset only moves forward and every check shares it.
+    # Returns $null while nothing worth acting on happened, or what this chunk of log
+    # said: the last disconnect code in it, and the server the client joined afterwards
+    # if it came back. Both are needed, because a disconnect line on its own does not
+    # mean the client is gone.
     $text = Read-NewLogText $session
+
+    $joins = [regex]::Matches($text, $joinAddressPattern)                            # every server it joined, with the address
 
     if (-not $session.JoinedAt -and $text.Contains($joinMarker))
     {
@@ -1799,13 +1823,66 @@ function Update-SessionFromLog($session)
         $session.NeverJoinedCount = 0
         $session.StepsPending = $true                                                 # freshly in the game, so the setup may be due
     }
-
-    $match = [regex]::Match($text, $disconnectPattern)                               # first disconnect line
-    if ($match.Success -and $ignoredDisconnectReasons -notcontains $match.Groups[1].Value)
+    if (-not $session.ServerAddress -and $joins.Count)
     {
-        return $match.Groups[1].Value
+        # Where this account belongs. Read from the log rather than configured, because
+        # the private server's address is not known until a client has connected to it.
+        $session.ServerAddress = $joins[0].Groups[1].Value
     }
-    return $null
+
+    # The last disconnect, not the first: a teleport logs the same code from three
+    # threads at once, and what matters is whether anything came after it
+    $disconnects = [regex]::Matches($text, $disconnectPattern)
+    $reason = $null
+    $reasonIndex = -1
+    for ($index = $disconnects.Count - 1; $index -ge 0; $index--)
+    {
+        if ($ignoredDisconnectReasons -contains $disconnects[$index].Groups[1].Value) { continue }
+        $reason = $disconnects[$index].Groups[1].Value
+        $reasonIndex = $disconnects[$index].Index
+        break
+    }
+
+    # A join after that line is the client putting itself back, which is the one thing
+    # that tells a teleport apart from a real drop
+    $rejoinAddress = $null
+    foreach ($join in $joins)
+    {
+        if ($join.Index -gt $reasonIndex) { $rejoinAddress = $join.Groups[1].Value }
+    }
+
+    if (-not $reason -and -not $rejoinAddress) { return $null }
+    return @{ Reason = $reason; RejoinAddress = $rejoinAddress }
+}
+
+function Find-LogByElimination($accountName)
+{
+    # A warm-started client writes to the log of the process it took over, which was
+    # created before this launch, so the usual "oldest log since launch" search never
+    # finds it and the session stays blind for as long as it runs: no disconnect codes,
+    # no drop count, no Discord alert. The main account sat like that for nine hours on
+    # 04-10 while it was in the game the whole time.
+    #
+    # A log cannot be asked which account it belongs to. But if every other session has
+    # its own log, and exactly one log is both unclaimed and still being written to,
+    # that one is this session's by elimination. More than one would be a guess, so it
+    # waits and tries again instead.
+    $session = $sessions[$accountName]
+    $takenPaths = @($sessions.Values | ForEach-Object { $_.LogPath } | Where-Object { $_ })
+    $candidates = @(Get-PlayerLogFiles |
+        Where-Object { $takenPaths -notcontains $_.FullName -and
+                       $_.LastWriteTime -ge (Get-Date).AddSeconds(-$logLivenessSeconds) -and
+                       -not (Test-IsStarterStub $_.FullName) })
+
+    if ($candidates.Count -ne 1) { return $false }
+
+    $session.LogPath = $candidates[0].FullName
+    $session.LogOffset = $candidates[0].Length                                        # only what happens from here on
+    $session.ServerAddress = $null
+    $session.PendingDrop = $null
+    Write-Log ("$accountName had no log of its own, and $(Split-Path -Leaf $session.LogPath) is the only " +
+               "live one left unclaimed, so it is read for $accountName from now on")
+    return $true
 }
 
 function Set-SessionState($session, $state)
@@ -1928,7 +2005,8 @@ foreach ($accountName in $allAccounts)
                                  EverStarted = $false; AppliedRect = $null
                                  DropCount = 0; LastDropAt = $null; LastDropReason = $null
                                  TotalUpSeconds = 0; StepsPending = $false; NeverJoinedCount = 0
-                                 LastFailureReason = $null }
+                                 LastFailureReason = $null; ServerAddress = $null
+                                 PendingDrop = $null; TeleportCount = 0 }
 }
 
 $globalPaused = $false
@@ -2505,6 +2583,10 @@ function Update-StatusUi
         {
             $parts.Add("no drops yet")
         }
+        if ($detailSession.TeleportCount -gt 0)
+        {
+            $parts.Add("teleported $($detailSession.TeleportCount)x and came back by itself")
+        }
         if ($detailSession.FailureCount -gt 0)
         {
             $parts.Add("$($detailSession.FailureCount) failed launch$(if ($detailSession.FailureCount -ne 1) { 'es' })")
@@ -2678,22 +2760,122 @@ function Invoke-SlowChecks
             {
                 if (-not (Get-SessionProcess $session))
                 {
-                    Stop-Session $accountName "is gone"
+                    # Roblox 0.741 can hand a session over to a new process and let the old
+                    # one exit, so a process going away is not proof the account is gone. If
+                    # exactly one client is unclaimed and sitting on in-game memory, it is
+                    # this session carrying on somewhere else, and relaunching would throw
+                    # away a game that is running.
+                    $claimedIds = @($sessions.Values | ForEach-Object { $_.ProcessId } | Where-Object { $_ -ne 0 })
+                    $handover = @(Get-Process $processName -ErrorAction SilentlyContinue |
+                        Where-Object { $claimedIds -notcontains $_.Id -and $_.MainWindowHandle -ne 0 -and
+                                       $_.WorkingSet64 -ge $joinedMemoryBytes })
+
+                    if ($handover.Count -eq 1 -and -not $launchInFlight)
+                    {
+                        $session.ProcessId = $handover[0].Id
+                        $session.ProcessStartTime = $handover[0].StartTime
+                        $session.WindowSeenAt = $null
+                        $session.AppliedRect = $null
+                        Write-Log ("$accountName's process went away, but PID $($handover[0].Id) is unclaimed and " +
+                                   "using $([int]($handover[0].WorkingSet64 / 1MB)) MB, so the session was handed " +
+                                   "over to it rather than relaunched")
+                        Set-SessionState $session "Tiling"                            # new process, new window to place
+                    }
+                    else
+                    {
+                        # Counted and alerted, unlike before: a main that dies this way used
+                        # to be relaunched in silence, which is exactly the case worth waking
+                        # up for
+                        $script:lastDisconnectAt = Get-Date
+                        $session.DropCount++
+                        $session.LastDropAt = Get-Date
+                        $session.LastDropReason = "its process went away"
+                        $droppedThisPass.Add("$accountName (its process went away)")
+                        if ($accountName -eq $mainAccount) { $mainDroppedThisPass = $true }
+                        Stop-Session $accountName "is gone"
+                    }
                 }
                 else
                 {
+                    # A session that never found a log is blind, so keep looking while it runs
+                    if (-not $session.LogPath -and $session.JoinedAt -and -not $launchInFlight)
+                    {
+                        [void](Find-LogByElimination $accountName)
+                    }
+
                     if ($session.LogPath)
                     {
-                        $disconnectReason = Update-SessionFromLog $session            # $null = still connected
-                        if ($disconnectReason)
+                        $logged = Update-SessionFromLog $session                       # $null = nothing new to act on
+                        $realDropReason = $null
+
+                        if ($logged -and $logged.Reason)
+                        {
+                            if ($logged.RejoinAddress -and $logged.RejoinAddress -eq $session.ServerAddress)
+                            {
+                                # The game teleports players between rounds: the client leaves
+                                # the server, logs a disconnect from three threads at once, and
+                                # rejoins the same server in the same process about five
+                                # seconds later. It was never gone. Killing it here is what
+                                # reset the main account over and over, back to spawn with its
+                                # rockets unplaced: 728 of the 785 disconnects in one log, 93%,
+                                # were this and every one of them cost a healthy session.
+                                $session.TeleportCount++
+                                $session.PendingDrop = $null
+                                Write-Log ("$accountName teleported and rejoined $($logged.RejoinAddress) by " +
+                                           "itself (reason $($logged.Reason)), so it is left alone")
+                            }
+                            elseif ($logged.RejoinAddress)
+                            {
+                                # Back in a game, but not the one it belongs to, so it does
+                                # need relaunching into the private server
+                                $session.PendingDrop = $null
+                                $realDropReason = ("$($logged.Reason), came back on $($logged.RejoinAddress) " +
+                                                   "instead of $($session.ServerAddress)")
+                            }
+                            elseif (-not $session.PendingDrop)
+                            {
+                                # No rejoin in this chunk, which may only mean the read landed
+                                # in the gap between the disconnect and the rejoin, so give it
+                                # a moment before throwing the session away
+                                $session.PendingDrop = @{ Reason = $logged.Reason; At = Get-Date }
+                                Write-Log ("$accountName logged a disconnect (reason $($logged.Reason)), waiting " +
+                                           "$rejoinGraceSeconds s to see whether it comes back by itself")
+                            }
+                        }
+                        elseif ($logged -and $logged.RejoinAddress -and $session.PendingDrop)
+                        {
+                            # The rejoin turned up in a later read than the disconnect did
+                            if (-not $session.ServerAddress -or $logged.RejoinAddress -eq $session.ServerAddress)
+                            {
+                                $session.TeleportCount++
+                                Write-Log ("$accountName came back on $($logged.RejoinAddress) by itself after " +
+                                           "reason $($session.PendingDrop.Reason), so it is left alone")
+                            }
+                            else
+                            {
+                                $realDropReason = ("$($session.PendingDrop.Reason), came back on " +
+                                                   "$($logged.RejoinAddress) instead of $($session.ServerAddress)")
+                            }
+                            $session.PendingDrop = $null
+                        }
+
+                        # Nothing came back within the grace period, so it really has dropped
+                        if ($session.PendingDrop -and
+                            ((Get-Date) - $session.PendingDrop.At).TotalSeconds -ge $rejoinGraceSeconds)
+                        {
+                            $realDropReason = $session.PendingDrop.Reason
+                            $session.PendingDrop = $null
+                        }
+
+                        if ($realDropReason)
                         {
                             $script:lastDisconnectAt = Get-Date
                             $session.DropCount++
                             $session.LastDropAt = Get-Date
-                            $session.LastDropReason = $disconnectReason
-                            $droppedThisPass.Add("$accountName (reason $disconnectReason)")
+                            $session.LastDropReason = $realDropReason
+                            $droppedThisPass.Add("$accountName (reason $realDropReason)")
                             if ($accountName -eq $mainAccount) { $mainDroppedThisPass = $true }
-                            Stop-Session $accountName "disconnected (reason $disconnectReason)"
+                            Stop-Session $accountName "disconnected (reason $realDropReason)"
                         }
                     }
 

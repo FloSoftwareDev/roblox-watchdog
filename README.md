@@ -6,6 +6,7 @@ what it does
 
 launches your alts into the private server through Roblox Account Manager (RAM, required, see below)
 relaunches any account that crashes or gets kicked, main included
+leaves a client alone when the game teleports it and it comes straight back by itself
 notices a client that launched but never got into the game and relaunches it
 relogs alts every X minutes so they don't go stale (main is never relogged)
 keeps the clients awake so Roblox doesn't kick them for being idle
@@ -99,6 +100,30 @@ Set it to 0 if you don't want that at all. If your PC sits at full memory the wh
 
 It also won't close more than one alt every two minutes. A closing client takes a while to hand its memory back, and the check runs every ten seconds, so without that gap a machine that stays low would close one alt after another until there were none left.
 
+about teleports, which are not disconnects
+
+The game moves players between rounds by teleporting them. The client leaves the server,
+writes a disconnect line in its log, and rejoins the same server about five seconds later
+without the window ever closing. Nothing is wrong and nothing needs doing.
+
+The watchdog used to read that disconnect line and close the client. 728 of the 785
+disconnects in four days of log were teleports, so most of what it did was close a healthy
+account and start it again, which puts your character back at spawn with its rockets
+unplaced. If you ever found an account back at the start for no reason, that was this.
+
+It now waits to see whether the client puts itself back on the same server. If it does,
+the account is left alone and the window says how many times it has teleported. If nothing
+comes back within 30 seconds, or it comes back somewhere other than your private server,
+it is treated as a real drop and relaunched. Every rejoin measured took between 4.7 and
+6.6 seconds, so 30 is a wide margin.
+
+The same goes for the process disappearing. Roblox can hand a session over to a new
+process and let the old one exit, so a process going away is not proof the account is
+gone. If exactly one client is unclaimed and sitting on in-game memory, the session is
+picked up where it is instead of being relaunched. Otherwise it counts as a drop, which
+it did not before, so a main that dies this way now reaches Discord instead of quietly
+coming back.
+
 about stuck clients and strays
 
 There are two ways an account can die that a disconnect code never tells you about, and both used to leave you to find it by hand.
@@ -112,7 +137,7 @@ where things are saved
 Everything lives in %LOCALAPPDATA%\RobloxWatchdog\:
 
 RobloxWatchdog.json, your settings. The RAM password in it is encrypted for your Windows account only, so a copy of the file is useless anywhere else
-RobloxWatchdog.log, everything the watchdog did, including why it stopped. The Log button in the window shows the same thing
+RobloxWatchdog.log, everything the watchdog did, including why it stopped. The Log button in the window shows the same thing. "teleported and rejoined" lines are the normal case above and mean nothing is wrong
 WindowPositions.json, where you dragged each account's window
 
 Settings get saved, so next time it's just start.
