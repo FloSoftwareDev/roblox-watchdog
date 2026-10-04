@@ -58,6 +58,10 @@
 #                                         minuut; er wordt nu meteen opnieuw om gevraagd. Daarnaast een instelling
 #                                         voor agressieve anti-idle: dubbel zo vaak, met lopen, muisbeweging en twee
 #                                         toetsaanslagen in plaats van een.
+#                                         Een teleport laat het personage opnieuw spawnen, dus de setup is daarna
+#                                         net zo goed nodig als na een herstart. Dat werd gemist sinds teleports
+#                                         niet meer tot een herstart leiden, waardoor main bij spawn bleef staan
+#                                         zonder raketten en zonder melding.
 #
 #------------------------------------------------------------------------------------#
 
@@ -2988,6 +2992,11 @@ function Invoke-SlowChecks
                                 # rockets unplaced: 728 of the 785 disconnects in one log, 93%,
                                 # were this and every one of them cost a healthy session.
                                 $session.TeleportCount++
+                                # A teleport respawns the character, so the setup is due again just as much as
+                                # after a relaunch. Absorbing the teleport instead of relaunching took away the
+                                # only thing that used to notice, which left main standing at spawn with its
+                                # rockets unplaced and nothing saying so.
+                                $session.StepsPending = $true
                                 $session.PendingDrop = $null
                                 Write-Log ("$accountName teleported and rejoined $($logged.RejoinAddress) by " +
                                            "itself (reason $($logged.Reason)), so it is left alone")
@@ -3018,6 +3027,11 @@ function Invoke-SlowChecks
                             if (-not $session.ServerAddress -or $logged.RejoinAddress -eq $session.ServerAddress)
                             {
                                 $session.TeleportCount++
+                                # A teleport respawns the character, so the setup is due again just as much as
+                                # after a relaunch. Absorbing the teleport instead of relaunching took away the
+                                # only thing that used to notice, which left main standing at spawn with its
+                                # rockets unplaced and nothing saying so.
+                                $session.StepsPending = $true
                                 Write-Log ("$accountName came back on $($logged.RejoinAddress) by itself after " +
                                            "reason $($session.PendingDrop.Reason), so it is left alone")
                             }
@@ -3185,6 +3199,11 @@ function Invoke-SlowChecks
         {
             $session.ServerAddress = $address
             $session.TeleportCount++
+            # A teleport respawns the character, so the setup is due again just as much as
+            # after a relaunch. Absorbing the teleport instead of relaunching took away the
+            # only thing that used to notice, which left main standing at spawn with its
+            # rockets unplaced and nothing saying so.
+            $session.StepsPending = $true
             Write-Log ("$accountName moved to $address with $($witnesses - 1) other account$(if ($witnesses -ne 2) { 's' }), " +
                        "so the private server moved rather than the account dropping (reason $reason)")
         }
