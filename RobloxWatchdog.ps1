@@ -48,6 +48,16 @@
 #                                         alle clients gesloten, main inbegrepen, want dat is het enige dat het
 #                                         oplost. Daarna starten ze allemaal opnieuw, met hoogstens een reset per
 #                                         tien minuten zodat het niet gaat stuiteren.
+# 010          05-10-2026 Miniwar AFK FG  De private server verhuist af en toe naar een nieuwe instance en neemt alle
+#                                         accounts mee. Dat werd gelezen als zes losse drops en alles werd opnieuw
+#                                         gestart, terwijl er niets aan de hand was. Nu wordt een nieuw adres pas
+#                                         beoordeeld aan het eind van de ronde: komen meerdere accounts op hetzelfde
+#                                         nieuwe adres uit, dan is het een verhuizing en blijft alles staan. Staat een
+#                                         account alleen op een adres waar niemand anders zit, dan is het wel weg.
+#                                         Anti-idle: focus werd 22% van de keren geweigerd en dat kostte telkens een
+#                                         minuut; er wordt nu meteen opnieuw om gevraagd. Daarnaast een instelling
+#                                         voor agressieve anti-idle: dubbel zo vaak, met lopen, muisbeweging en twee
+#                                         toetsaanslagen in plaats van een.
 #
 #------------------------------------------------------------------------------------#
 
@@ -78,6 +88,7 @@ $ignoredDisconnectReasons = @()                                                 
 $joinMarker = "Connection accepted"                                                  # logged only once the client is really in the game
 $joinAddressPattern = "Connection accepted from ([0-9.]+\|[0-9]+)"                   # the server it joined, so a rejoin can be compared with it
 $rejoinGraceSeconds = 30                                                             # a teleport is back in about 5 s, so this is plenty
+$migrationWitnesses = 2                                                              # accounts landing on the same new server before it counts as a move
 $logLivenessSeconds = 120                                                            # a log written more recently than this belongs to a live client
 $instanceGuardPattern = "SingleInstanceGuard"                                        # Roblox crashing in its own guard instead of starting a client
 $instanceGuardCheckSeconds = 10                                                      # long enough for the failed starter to have written its log
@@ -399,6 +410,7 @@ Add-Type -Namespace Win32 -Name Window -MemberDefinition @"
 [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
 [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
 [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key);
+[DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint action, uint param, ref uint value, uint update);
 "@
 
 # Separate block because it needs a struct, which -MemberDefinition cannot declare.
@@ -546,6 +558,7 @@ function Get-DefaultSettings
         FramerateCap           = "30"
         AntiIdleMinutes        = "15"
         AntiIdleKey            = "Space"
+        AggressiveAntiIdle     = "False"
         ReapStrayMinutes       = "3"
         UseAllMonitors         = "True"
         DiscordWebhookUrl      = ""
@@ -775,6 +788,16 @@ function Show-SettingsWindow($saved)
     $form.Controls.Add($allMonitorsBox)
     $rowTop += 26
 
+    $aggressiveIdleBox = New-Object System.Windows.Forms.CheckBox
+    $aggressiveIdleBox.Text = "Aggressive anti-idle (more input, twice as often)"
+    $aggressiveIdleBox.Location = New-Object System.Drawing.Point(248, $rowTop)
+    $aggressiveIdleBox.Size = New-Object System.Drawing.Size(320, 20)
+    $aggressiveIdleBox.Checked = ($saved["AggressiveAntiIdle"] -eq "True")
+    $aggressiveIdleBox.FlatStyle = "Flat"
+    $aggressiveIdleBox.ForeColor = $themeText
+    $form.Controls.Add($aggressiveIdleBox)
+    $rowTop += 26
+
     $rememberPositionsBox = New-Object System.Windows.Forms.CheckBox
     $rememberPositionsBox.Text = "Put windows back where I dragged them"
     $rememberPositionsBox.Location = New-Object System.Drawing.Point(248, $rowTop)
@@ -912,6 +935,7 @@ function Show-SettingsWindow($saved)
     }
     $result["CloseOtherClients"] = [string]$closeOthersBox.Checked
     $result["UseAllMonitors"] = [string]$allMonitorsBox.Checked
+    $result["AggressiveAntiIdle"] = [string]$aggressiveIdleBox.Checked
     $result["RememberWindowPositions"] = [string]$rememberPositionsBox.Checked
     $result["RunStepsOnRejoin"] = [string]$runOnRejoinBox.Checked
     return $result
@@ -1059,6 +1083,7 @@ $closeOtherClients = ($settings.CloseOtherClients -ne "False")
 $framerateCap = [int]$settings.FramerateCap
 $antiIdleMinutes = [int]$settings.AntiIdleMinutes
 $antiIdleKey = $settings.AntiIdleKey
+$aggressiveAntiIdle = ($settings.AggressiveAntiIdle -eq "True")
 # A-Z virtual key codes are the same numbers as their uppercase characters
 $antiIdleVirtualKey = if ($antiIdleKey -eq "Space") { [byte]0x20 } else { [byte][char]([string]$antiIdleKey).ToUpper() }
 $reapStrayMinutes = [int]$settings.ReapStrayMinutes
@@ -1506,6 +1531,15 @@ function Step-StepRun
     $script:stepRun.NextAt = (Get-Date).AddMilliseconds($stepGapMilliseconds)
 }
 
+function Get-AntiIdleInterval
+{
+    # Aggressive mode goes twice as often, with a floor of one minute. Roblox pulls the
+    # plug at 20, so the normal setting is already capped at 18 in the settings window.
+    if (-not $aggressiveAntiIdle) { return $antiIdleMinutes }
+    return [math]::Max(1, [int][math]::Floor($antiIdleMinutes / 2))                     # floor, so 15 becomes 7 rather than 8
+
+}
+
 function Send-AntiIdleInput($accountName)
 {
     # Roblox kicks a client after 20 minutes without input, and it only counts input
@@ -1525,21 +1559,68 @@ function Send-AntiIdleInput($accountName)
 
     $previous = [Win32.Window]::GetForegroundWindow()                                 # give this back when done
 
-    if (-not (Set-WindowFocused $handle))
+    # Focus is refused often enough to matter: 1301 of 5867 attempts in one log, 22%,
+    # and every refusal used to mean waiting another minute. Windows hands focus over
+    # far more readily on the second or third ask, so ask again here instead.
+    $attempts = if ($aggressiveAntiIdle) { 4 } else { 2 }
+    $focused = $false
+    for ($attempt = 1; $attempt -le $attempts -and -not $focused; $attempt++)
+    {
+        $focused = Set-WindowFocused $handle
+        if (-not $focused -and $attempt -lt $attempts) { Start-Sleep -Milliseconds 150 }
+    }
+
+    if (-not $focused)
     {
         # Retry in a minute rather than fighting for focus on every tick
-        $session.LastInputAt = (Get-Date).AddMinutes(1 - $antiIdleMinutes)
-        Write-Log "WARNING: could not focus $accountName, anti-idle keystroke not sent, retrying in 1 min"
+        $session.LastInputAt = (Get-Date).AddMinutes(1 - (Get-AntiIdleInterval))
+        Write-Log ("WARNING: could not focus $accountName after $attempts tries, anti-idle keystroke not " +
+                   "sent, retrying in 1 min")
         Write-ElevationHint
         return
     }
 
     $scanCode = [byte]([Win32.Window]::MapVirtualKey($antiIdleVirtualKey, 0))          # games want a real scan code
+
+    if ($aggressiveAntiIdle)
+    {
+        # One tap is enough for Roblox's own 20 minute timer, but a game can watch for
+        # more than that, so this moves the character and the mouse as well. W is held
+        # rather than tapped because a tap can be swallowed between frames.
+        $moveKey = [byte]0x57                                                          # W
+        $moveScan = [byte]([Win32.Window]::MapVirtualKey($moveKey, 0))
+        [Win32.Window]::keybd_event($moveKey, $moveScan, 0, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 220
+        [Win32.Window]::keybd_event($moveKey, $moveScan, 2, [UIntPtr]::Zero)
+
+        $rectangle = Get-WindowRectangle $handle
+        if ($rectangle)
+        {
+            # Inside the window, so the move cannot land on another client
+            $centreX = [int]($rectangle.Left + ($rectangle.Right - $rectangle.Left) / 2)
+            $centreY = [int]($rectangle.Top + ($rectangle.Bottom - $rectangle.Top) / 2)
+            [Win32.Window]::SetCursorPos($centreX, $centreY) | Out-Null
+            Start-Sleep -Milliseconds 40
+            [Win32.Window]::SetCursorPos($centreX + 12, $centreY + 8) | Out-Null
+        }
+    }
+
     [Win32.Window]::keybd_event($antiIdleVirtualKey, $scanCode, 0, [UIntPtr]::Zero)    # key down
     Start-Sleep -Milliseconds 80
     [Win32.Window]::keybd_event($antiIdleVirtualKey, $scanCode, 2, [UIntPtr]::Zero)    # KEYEVENTF_KEYUP
+
+    if ($aggressiveAntiIdle)
+    {
+        Start-Sleep -Milliseconds 60
+        [Win32.Window]::keybd_event($antiIdleVirtualKey, $scanCode, 0, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 80
+        [Win32.Window]::keybd_event($antiIdleVirtualKey, $scanCode, 2, [UIntPtr]::Zero)
+    }
+
     $session.LastInputAt = Get-Date
-    Write-Log "anti-idle: pressed $antiIdleKey in $accountName"
+    $how = if ($aggressiveAntiIdle) { "walked and pressed $antiIdleKey twice" } else { "pressed $antiIdleKey" }
+    Write-Log ("anti-idle: $how in $accountName" +
+               $(if ($attempt -gt 2) { " (focus took $($attempt - 1) tries)" } else { "" }))
 
     if ($previous -ne [IntPtr]::Zero -and $previous -ne $handle)
     {
@@ -2090,7 +2171,8 @@ foreach ($accountName in $allAccounts)
                                  DropCount = 0; LastDropAt = $null; LastDropReason = $null
                                  TotalUpSeconds = 0; StepsPending = $false; NeverJoinedCount = 0
                                  LastFailureReason = $null; ServerAddress = $null
-                                 PendingDrop = $null; TeleportCount = 0 }
+                                 PendingDrop = $null; TeleportCount = 0
+                                 PendingAddress = $null }
 }
 
 $globalPaused = $false
@@ -2532,6 +2614,7 @@ $settingsButton.Add_Click({
     $script:framerateCap = [int]$updated.FramerateCap
     $script:antiIdleMinutes = [int]$updated.AntiIdleMinutes
     $script:antiIdleKey = $updated.AntiIdleKey
+    $script:aggressiveAntiIdle = ($updated.AggressiveAntiIdle -eq "True")
     $script:antiIdleVirtualKey = if ($updated.AntiIdleKey -eq "Space") { [byte]0x20 } else { [byte][char]([string]$updated.AntiIdleKey).ToUpper() }
     $script:reapStrayMinutes = [int]$updated.ReapStrayMinutes
     $script:closeOtherClients = ($updated.CloseOtherClients -ne "False")
@@ -2911,11 +2994,13 @@ function Invoke-SlowChecks
                             }
                             elseif ($logged.RejoinAddress)
                             {
-                                # Back in a game, but not the one it belongs to, so it does
-                                # need relaunching into the private server
+                                # Back in a game, but not on the server it belongs to. That
+                                # is either this one account being moved away on its own, or
+                                # the private server itself having moved and taken everyone
+                                # with it. Which one cannot be told from this account alone,
+                                # so it waits for the end of the pass.
                                 $session.PendingDrop = $null
-                                $realDropReason = ("$($logged.Reason), came back on $($logged.RejoinAddress) " +
-                                                   "instead of $($session.ServerAddress)")
+                                $session.PendingAddress = @{ Address = $logged.RejoinAddress; Reason = $logged.Reason }
                             }
                             elseif (-not $session.PendingDrop)
                             {
@@ -2938,8 +3023,8 @@ function Invoke-SlowChecks
                             }
                             else
                             {
-                                $realDropReason = ("$($session.PendingDrop.Reason), came back on " +
-                                                   "$($logged.RejoinAddress) instead of $($session.ServerAddress)")
+                                $session.PendingAddress = @{ Address = $logged.RejoinAddress
+                                                             Reason = $session.PendingDrop.Reason }
                             }
                             $session.PendingDrop = $null
                         }
@@ -3054,7 +3139,7 @@ function Invoke-SlowChecks
                 # has gone quiet
                 if ($antiIdleMinutes -gt 0 -and -not $script:globalPaused -and -not $antiIdleSentThisPass -and
                     $session.State -eq "Running" -and
-                    $session.LastInputAt -and ((Get-Date) - $session.LastInputAt).TotalMinutes -ge $antiIdleMinutes)
+                    $session.LastInputAt -and ((Get-Date) - $session.LastInputAt).TotalMinutes -ge (Get-AntiIdleInterval))
                 {
                     Send-AntiIdleInput $accountName
                     $antiIdleSentThisPass = $true
@@ -3070,6 +3155,51 @@ function Invoke-SlowChecks
     # Main dropping is the one worth being interrupted for, so it pings. Sent as one
     # message either way: if main went down with the others, the group alert carries the
     # ping rather than firing a second notification for the same event.
+    # Every account that came back somewhere unexpected is decided here rather than when
+    # it was seen, because one account cannot tell the difference on its own. If several
+    # landed on the same new server, the private server moved and took them with it: that
+    # happened at 20:38 on 04-10 and all six were closed and relaunched for nothing. If
+    # an account is alone on an address nobody else is on, it really has been moved out
+    # of the farm and does need relaunching.
+    $parked = @($allAccounts | Where-Object { $sessions[$_].PendingAddress })
+
+    # Taken as a snapshot first. Clearing each one as the loop goes would mean every
+    # account after the first saw fewer accounts agreeing with it than the one before.
+    $parkedAddress = @{}
+    foreach ($accountName in $parked) { $parkedAddress[$accountName] = $sessions[$accountName].PendingAddress }
+
+    foreach ($accountName in $parked)
+    {
+        $session = $sessions[$accountName]
+        $address = $parkedAddress[$accountName].Address
+        $reason = $parkedAddress[$accountName].Reason
+        $session.PendingAddress = $null
+
+        # Everyone sitting on that address already, plus everyone who moved to it in
+        # this same pass. Counts itself, so one witness means nobody else agrees.
+        $witnesses = @($allAccounts | Where-Object {
+            $sessions[$_].ServerAddress -eq $address -or
+            ($parkedAddress.ContainsKey($_) -and $parkedAddress[$_].Address -eq $address) }).Count
+
+        if ($witnesses -ge $migrationWitnesses)
+        {
+            $session.ServerAddress = $address
+            $session.TeleportCount++
+            Write-Log ("$accountName moved to $address with $($witnesses - 1) other account$(if ($witnesses -ne 2) { 's' }), " +
+                       "so the private server moved rather than the account dropping (reason $reason)")
+        }
+        else
+        {
+            $script:lastDisconnectAt = Get-Date
+            $session.DropCount++
+            $session.LastDropAt = Get-Date
+            $session.LastDropReason = "$reason, left for $address on its own"
+            $droppedThisPass.Add("$accountName (reason $reason, left for $address on its own)")
+            if ($accountName -eq $mainAccount) { $mainDroppedThisPass = $true }
+            Stop-Session $accountName "came back on $address, which no other account is on"
+        }
+    }
+
     if ($mainDroppedThisPass)
     {
         if ($droppedThisPass.Count -gt 1)

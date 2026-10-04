@@ -78,6 +78,10 @@ Roblox kicks a client after 20 minutes without input, and it only counts input w
 
 Default is every 15 minutes per account, and each account is on its own timer starting from when it joined, so they don't all do it at once. Max is 18, because 20 is when Roblox pulls the plug. Set it to 0 to turn it off.
 
+"Aggressive anti-idle" does it twice as often (15 becomes 7), holds a movement key so the character actually walks, nudges the mouse inside the window, and presses the key twice instead of once. Use it if a game has its own idle check that watches more than keyboard input. It costs a bit more focus flicker, which is why it is off by default.
+
+Getting focus is the weak point, not the keystroke. Windows refused it on 1301 of 5867 attempts in four days of log, 22%, mostly while someone was actually using the PC, and every refusal used to mean waiting another minute. It now asks again straight away, twice normally and four times in aggressive mode, before giving up and trying in a minute.
+
 Default key is Space, which is the most reliable thing to register as input but does make your character jump. Any single letter works too, so pick something your game ignores if jumping is a problem.
 
 Two things to know. With several accounts you'll see a brief focus flicker every few minutes, and if you happen to be typing at that exact moment the keystroke goes to Roblox instead of to you. And if Windows refuses to hand over focus, the keystroke is skipped and it tries again a minute later rather than fighting for it.
@@ -128,9 +132,15 @@ unplaced. If you ever found an account back at the start for no reason, that was
 
 It now waits to see whether the client puts itself back on the same server. If it does,
 the account is left alone and the window says how many times it has teleported. If nothing
-comes back within 30 seconds, or it comes back somewhere other than your private server,
-it is treated as a real drop and relaunched. Every rejoin measured took between 4.7 and
-6.6 seconds, so 30 is a wide margin.
+comes back within 30 seconds it is treated as a real drop and relaunched. Every rejoin
+measured took between 4.7 and 6.6 seconds, so 30 is a wide margin.
+
+Coming back on a *different* server is decided at the end of the round rather than on the
+spot, because one account cannot tell the difference on its own. If several accounts land
+on the same new server, the private server itself moved and took them with it, and they
+are all left alone. If an account is on an address no other account is on, it really has
+been moved out of the farm and is relaunched. With a single account there is nobody to
+corroborate it, so it gets relaunched to be safe.
 
 The same goes for the process disappearing. Roblox can hand a session over to a new
 process and let the old one exit, so a process going away is not proof the account is
