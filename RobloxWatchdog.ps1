@@ -62,6 +62,9 @@
 #                                         net zo goed nodig als na een herstart. Dat werd gemist sinds teleports
 #                                         niet meer tot een herstart leiden, waardoor main bij spawn bleef staan
 #                                         zonder raketten en zonder melding.
+#                                         De watchdog kijkt nu ook of er een nieuwere versie uit is en zegt dat op
+#                                         de strook bovenin, aanklikbaar naar de downloadpagina. Eens per zes uur,
+#                                         op de achtergrond, en als het mislukt gebeurt er gewoon niets.
 #
 #------------------------------------------------------------------------------------#
 
@@ -94,6 +97,10 @@ $joinAddressPattern = "Connection accepted from ([0-9.]+\|[0-9]+)"              
 $rejoinGraceSeconds = 30                                                             # a teleport is back in about 5 s, so this is plenty
 $migrationWitnesses = 2                                                              # accounts landing on the same new server before it counts as a move
 $logLivenessSeconds = 120                                                            # a log written more recently than this belongs to a live client
+$watchdogVersion = "1.6.0"                                                           # the build stamps the exe with this too, and the exe wins at runtime
+$releaseApiUrl = "https://api.github.com/repos/FloSoftwareDev/roblox-watchdog/releases/latest"
+$releasePageUrl = "https://github.com/FloSoftwareDev/roblox-watchdog/releases/latest"
+$versionCheckHours = 6                                                               # it runs for days at a time, so once at the start is not enough
 $instanceGuardPattern = "SingleInstanceGuard"                                        # Roblox crashing in its own guard instead of starting a client
 $instanceGuardCheckSeconds = 10                                                      # long enough for the failed starter to have written its log
 $instanceGuardCooldownMinutes = 10                                                   # closing everything is drastic, so never thrash at it
@@ -194,6 +201,88 @@ function Send-DiscordAlert($title, $message, $color, $ping)
     catch
     {
         Write-Log "WARNING: could not send the Discord alert: $($_.Exception.Message)"
+    }
+}
+
+function Get-OwnVersion
+{
+    # Compiled, the exe carries the version the build stamped on it, and that is the one
+    # that matters because that is what people downloaded.
+    #
+    # Run as a .ps1 the host is powershell.exe, which is also an .exe with a version of
+    # its own, and taking that gave 10.0.26100.8457 as the watchdog's version. So the
+    # product name has to match before the stamp is believed. Checking the name rather
+    # than the file means a renamed copy still works, which matters because the one
+    # pinned to a taskbar is often renamed.
+    try
+    {
+        $exePath = [Environment]::GetCommandLineArgs()[0]
+        if ($exePath -like "*.exe" -and (Test-Path $exePath))
+        {
+            $info = (Get-Item $exePath).VersionInfo
+            if ($info.ProductName -eq "Roblox Watchdog" -and $info.FileVersion)
+            {
+                return ($info.FileVersion -replace "[^0-9.]", "")
+            }
+        }
+    }
+    catch { }
+    return $watchdogVersion
+}
+
+function Start-VersionCheck
+{
+    # Asked for in the background and read on a later pass, so a slow or missing
+    # connection never holds the window up. Failing is fine: not knowing whether there
+    # is a newer version is not worth saying anything about.
+    if ($script:versionCheckTask) { return }
+    $script:lastVersionCheckAt = Get-Date
+    try
+    {
+        $request = New-Object System.Net.Http.HttpRequestMessage("Get", $releaseApiUrl)
+        $request.Headers.Add("User-Agent", "RobloxWatchdog")                          # GitHub refuses a request without one
+        $request.Headers.Add("Accept", "application/vnd.github+json")
+        $script:versionCheckTask = $httpClient.SendAsync($request)
+    }
+    catch
+    {
+        $script:versionCheckTask = $null
+    }
+}
+
+function Complete-VersionCheck
+{
+    if (-not $script:versionCheckTask -or -not $script:versionCheckTask.IsCompleted) { return }
+    $task = $script:versionCheckTask
+    $script:versionCheckTask = $null
+    try
+    {
+        $response = $task.Result
+        if (-not $response.IsSuccessStatusCode) { return }
+        $body = $response.Content.ReadAsStringAsync().Result
+
+        # Read with a pattern rather than ConvertFrom-Json: the reply is a large object
+        # and the tag is the only part of it that matters
+        if ($body -notmatch '"tag_name"\s*:\s*"v?([0-9]+(?:\.[0-9]+){0,3})"') { return }
+        $latest = $matches[1]
+        $mine = Get-OwnVersion
+        if ([version]$latest -gt [version]$mine)
+        {
+            if ($script:newerVersion -ne $latest)
+            {
+                $script:newerVersion = $latest
+                Write-Log "a newer version is out: v$latest, this one is v$mine"
+            }
+        }
+        else
+        {
+            $script:newerVersion = $null
+        }
+    }
+    catch
+    {
+        # No connection, a rate limit, or a reply that does not look like a release.
+        # None of those are worth a line in the log every six hours.
     }
 }
 
@@ -2182,6 +2271,9 @@ foreach ($accountName in $allAccounts)
 $globalPaused = $false
 $reallyExit = $false
 $lastInstanceGuardResetAt = $null
+$versionCheckTask = $null
+$lastVersionCheckAt = $null
+$newerVersion = $null
 $strayClosedCount = 0
 $lastDisconnectAt = $null
 $lastFreeMegabytes = 0
@@ -2283,6 +2375,14 @@ else
     $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(45, 36, 20)
     $elevationStrip.ForeColor = $themeAmber
 }
+# Kept, because the update notice is added as a second line on this same strip rather
+# than as another one that would push the whole window down
+$elevationStripText = $elevationStrip.Text
+$elevationStripBack = $elevationStrip.BackColor
+$elevationStripFore = $elevationStrip.ForeColor
+$elevationStrip.Add_Click({
+    if ($script:newerVersion) { Start-Process $releasePageUrl }
+})
 $statusForm.Controls.Add($elevationStrip)
 
 $headline = New-Object System.Windows.Forms.Label
@@ -2775,6 +2875,29 @@ function Update-StatusUi
     else
     {
         $detailLabel.Text = if ($accountList.SelectedItems.Count -gt 1) { "$($accountList.SelectedItems.Count) accounts selected" } else { "" }
+    }
+
+    # Shown on the strip at the top because that is the one thing always on screen, and
+    # only redrawn when it changes so a click is not stolen mid press
+    $shownVersion = if ($script:newerVersion) { $script:newerVersion } else { "" }
+    if ($elevationStrip.Tag -ne $shownVersion)
+    {
+        $elevationStrip.Tag = $shownVersion
+        if ($shownVersion)
+        {
+            $elevationStrip.Text = ($elevationStripText + [char]0x000A +
+                                    "Version $shownVersion is out and this is $(Get-OwnVersion). Click here to download it.")
+            $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(22, 38, 50)
+            $elevationStrip.ForeColor = $themeAccent
+            $elevationStrip.Cursor = [System.Windows.Forms.Cursors]::Hand
+        }
+        else
+        {
+            $elevationStrip.Text = $elevationStripText
+            $elevationStrip.BackColor = $elevationStripBack
+            $elevationStrip.ForeColor = $elevationStripFore
+            $elevationStrip.Cursor = [System.Windows.Forms.Cursors]::Default
+        }
     }
 
     $selectedCount = $accountList.SelectedItems.Count
@@ -3274,6 +3397,13 @@ function Invoke-SlowChecks
                 "watchdog window.") $alertAmber $true
         }
     }
+
+    if (-not $script:lastVersionCheckAt -or
+        ((Get-Date) - $script:lastVersionCheckAt).TotalHours -ge $versionCheckHours)
+    {
+        Start-VersionCheck
+    }
+    Complete-VersionCheck
 
     Complete-PendingWebhooks
 }

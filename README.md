@@ -16,6 +16,7 @@ if your PC runs low on RAM, it closes the heaviest alt instead of letting everyt
 clears out the leftover Roblox processes that pile up in Task Manager
 tells you on Discord when something actually needs you
 starts itself again if it crashes
+tells you when there is a newer version, on the strip at the top of the window
 keeps retrying with a growing delay when a launch fails, instead of dying
 
 you need Roblox Account Manager
@@ -43,6 +44,8 @@ also: it works out which client is your main by taking the oldest one that's alr
 the window
 
 A strip along the top says whether it's running as administrator, because that one thing silently breaks tiling, anti-idle and stray cleanup.
+
+The same strip tells you when a newer version is out, and clicking it opens the download. It asks GitHub once at startup and every six hours after, in the background, and if there is no connection it just says nothing.
 
 Under that: how many accounts are playing, free memory, strays closed, how long the watchdog has been up, and how long since the last disconnect. Then a row per account with a coloured dot, what it's doing, its memory, how long it's been up, and how many times it has dropped. The drop count goes amber at five, which is how you spot one account that's having a worse time than the others. Select a row and the line underneath shows its total uptime and when it last dropped, and why.
 
