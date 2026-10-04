@@ -39,6 +39,15 @@
 #                                         meer: een warm gestarte sessie wordt overgenomen in plaats van herstart, en
 #                                         anders wel geteld en gemeld. Een sessie zonder logbestand zoekt nu door tot
 #                                         hij er een heeft, want zonder logbestand ziet de watchdog niets.
+# 009          04-10-2026 Miniwar AFK FG  Roblox weigert soms een tweede client te starten door in zijn eigen
+#                                         SingleInstanceGuard te crashen: de nieuwe starter kan het venster van de
+#                                         draaiende client niet bereiken en stopt voordat er een venster is. RAM meldt
+#                                         niets, want RAM heeft zijn deel gedaan. Dat werd 90 seconden afgewacht en
+#                                         daarna eindeloos opnieuw geprobeerd, terwijl opnieuw proberen niets oplost.
+#                                         Nu wordt de crash in het logbestand van de mislukte start herkend en worden
+#                                         alle clients gesloten, main inbegrepen, want dat is het enige dat het
+#                                         oplost. Daarna starten ze allemaal opnieuw, met hoogstens een reset per
+#                                         tien minuten zodat het niet gaat stuiteren.
 #
 #------------------------------------------------------------------------------------#
 
@@ -70,6 +79,9 @@ $joinMarker = "Connection accepted"                                             
 $joinAddressPattern = "Connection accepted from ([0-9.]+\|[0-9]+)"                   # the server it joined, so a rejoin can be compared with it
 $rejoinGraceSeconds = 30                                                             # a teleport is back in about 5 s, so this is plenty
 $logLivenessSeconds = 120                                                            # a log written more recently than this belongs to a live client
+$instanceGuardPattern = "SingleInstanceGuard"                                        # Roblox crashing in its own guard instead of starting a client
+$instanceGuardCheckSeconds = 10                                                      # long enough for the failed starter to have written its log
+$instanceGuardCooldownMinutes = 10                                                   # closing everything is drastic, so never thrash at it
 $joinTimeoutSeconds = 150                                                            # no join by then means it is stuck on an error screen
 $joinedMemoryBytes = 1GB                                                             # in-game clients sit on 3 GB, stuck ones on about 170 MB
 $memoryKillCooldownSeconds = 120                                                     # long enough for a closed client to hand its memory back
@@ -1604,6 +1616,63 @@ function Request-Launch($accountName)
     Set-SessionState $session "Launching"
 }
 
+function Test-LaunchHitInstanceGuard($session)
+{
+    # Roblox can refuse to start another client by crashing inside its own single
+    # instance guard: the new starter looks for the running client's guard window, does
+    # not find it, and throws "Invalid window handle" before any window appears. RAM
+    # reports nothing, because RAM did its part and asked for the launch. The only trace
+    # is a 1.3 KB log that ends in RBXCRASH, so that is what gets read.
+    try
+    {
+        foreach ($file in @(Get-PlayerLogFiles |
+            Where-Object { $_.CreationTime -ge $session.LaunchedAt -and $_.Length -lt 64KB -and
+                           $_.CreationTime -le $session.LaunchedAt.AddSeconds($launchTimeoutSeconds) }))
+        {
+            if ((Get-Content $file.FullName -Raw -ErrorAction Stop) -match $instanceGuardPattern) { return $true }
+        }
+    }
+    catch { }
+    return $false
+}
+
+function Reset-RobloxInstanceGuard($trigger)
+{
+    # Nothing can start while Roblox believes a client holds the guard and that client's
+    # window is gone, and retrying changes nothing: the farm sat dead through two hours
+    # of retries on 04-10. The only thing seen to clear it is every Roblox client being
+    # gone. That is how it recovered by hand the first time: with nothing left running,
+    # all six accounts launched in a row without trouble. It means closing main as well,
+    # so it is said out loud rather than done quietly.
+    $script:lastInstanceGuardResetAt = Get-Date
+    Write-Log ("ERROR: Roblox will not start another client, it crashes in its own single instance guard " +
+               "instead. Closing every Roblox client, main included, because that is the only thing known " +
+               "to clear it, then relaunching all of them")
+    Send-DiscordAlert "Roblox would not start another client" (
+        "Roblox crashed inside its own single instance guard while launching $trigger, so no new client " +
+        "could start and retrying would not have helped.`n`nEvery client is being closed, main included, " +
+        "and all of them are being relaunched. That is the only thing known to clear it.") $alertRed $true
+
+    foreach ($accountName in $allAccounts)
+    {
+        $session = $sessions[$accountName]
+        if ($session.State -ne "Idle")
+        {
+            Stop-Session $accountName "closed to clear Roblox's single instance guard"
+        }
+        $session.FailureCount = 0
+        $session.LastFailureReason = $null
+    }
+
+    # A process Roblox left behind holds the guard just as well as a tracked client does
+    foreach ($leftover in @(Get-Process $processName -ErrorAction SilentlyContinue))
+    {
+        Stop-Process -Id $leftover.Id -Force -ErrorAction SilentlyContinue
+    }
+
+    Update-LaunchQueue $relaunchDelaySeconds
+}
+
 function Step-Launching($accountName)
 {
     $session = $sessions[$accountName]
@@ -1638,6 +1707,21 @@ function Step-Launching($accountName)
         $session.ProcessStartTime = $newClient.StartTime
         Set-SessionState $session "FindingLog"
         return
+    }
+
+    # Roblox can fail a launch without any window ever appearing, and then waiting out
+    # the timeout and retrying on a longer and longer backoff changes nothing at all
+    if (((Get-Date) - $session.StateSince).TotalSeconds -gt $instanceGuardCheckSeconds -and
+        (Test-LaunchHitInstanceGuard $session))
+    {
+        if (-not $script:lastInstanceGuardResetAt -or
+            ((Get-Date) - $script:lastInstanceGuardResetAt).TotalMinutes -ge $instanceGuardCooldownMinutes)
+        {
+            Reset-RobloxInstanceGuard $accountName
+            return
+        }
+        throw ("Roblox crashed in its own single instance guard, and closing everything to clear it was " +
+               "already tried less than $instanceGuardCooldownMinutes minutes ago")
     }
 
     if (((Get-Date) - $session.StateSince).TotalSeconds -gt $launchTimeoutSeconds)
@@ -2011,6 +2095,7 @@ foreach ($accountName in $allAccounts)
 
 $globalPaused = $false
 $reallyExit = $false
+$lastInstanceGuardResetAt = $null
 $strayClosedCount = 0
 $lastDisconnectAt = $null
 $lastFreeMegabytes = 0

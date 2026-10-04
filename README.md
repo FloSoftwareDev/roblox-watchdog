@@ -100,6 +100,21 @@ Set it to 0 if you don't want that at all. If your PC sits at full memory the wh
 
 It also won't close more than one alt every two minutes. A closing client takes a while to hand its memory back, and the check runs every ten seconds, so without that gap a machine that stays low would close one alt after another until there were none left.
 
+when nothing will launch at all
+
+Roblox sometimes refuses to start another client by crashing inside its own single
+instance guard. The new client looks for the running client's guard window, cannot reach
+it, and gives up before any window appears. RAM reports success, because RAM did its part
+and asked for the launch, so from the outside it just looks like nothing happened.
+
+Waiting it out does not help and neither does retrying: the only thing that clears it is
+every Roblox process being gone, main included. The watchdog now spots the crash in the
+failed launch's own log, says so, closes everything and starts all the accounts again. It
+tells you on Discord, because closing main is not something it should do quietly, and it
+will not do it more than once every ten minutes.
+
+If you ever see it by hand, that is the fix: close every Roblox window, then start again.
+
 about teleports, which are not disconnects
 
 The game moves players between rounds by teleporting them. The client leaves the server,
