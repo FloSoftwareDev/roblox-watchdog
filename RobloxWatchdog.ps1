@@ -78,6 +78,12 @@
 #                                         en voor een groep van drie of meer tegelijk. De melding dat de setup weer
 #                                         nodig is hing eerst aan het hebben van een stappenlijst, waardoor wie het
 #                                         met de hand doet niets te horen kreeg.
+# 012          06-10-2026 Miniwar AFK FG  Roblox kan een join weigeren met 403 en challengedByGcs, waarna de client de
+#                                         vasthoudcontrole laat zien. Dat zag eruit als vastlopen op een foutmelding,
+#                                         dus werd de client na 150 seconden gesloten en opnieuw gestart: drie keer in
+#                                         zeven minuten op 05-10, en elke poging vraagt Roblox opnieuw. Nu wordt het
+#                                         venster met rust gelaten tot iemand de controle doet, met een melding erbij,
+#                                         en daarna gaat het account gewoon verder.
 #
 #------------------------------------------------------------------------------------#
 
@@ -108,6 +114,7 @@ $ignoredDisconnectReasons = @()                                                 
 $joinMarker = "Connection accepted"                                                  # logged only once the client is really in the game
 $joinAddressPattern = "Connection accepted from ([0-9.]+\|[0-9]+)"                   # the server it joined, so a rejoin can be compared with it
 $teleportMarker = "SessionTransitionFSM] Teleported."                                # the game moving the player, which no real drop ever logs
+$challengePattern = "challengedByGcs|challengePageLoaded"                            # Roblox refusing the join until a person passes its check
 $rejoinGraceSeconds = 30                                                             # a teleport is back in about 5 s, so this is plenty
 $migrationWitnesses = 2                                                              # accounts landing on the same new server before it counts as a move
 $relogWaveSize = 3                                                                   # accounts relogging together before it is worth saying so on its own
@@ -1961,6 +1968,8 @@ function Step-FindingLog($accountName)
         $session.JoinedAt = $null                                                     # not in the game until the log says so
         $session.ServerAddress = $null                                                # read from the log's first join line
         $session.PendingDrop = $null
+        $session.ChallengeSeenAt = $null
+        $session.ChallengeAlerted = $false
         $session.LastInputAt = Get-Date                                               # joining counts as input
         $session.WindowSeenAt = $null
         $session.EverStarted = $true
@@ -2118,6 +2127,25 @@ function Update-SessionFromLog($session)
         $session.JoinedAt = Get-Date
         $session.NeverJoinedCount = 0
         $session.StepsPending = $true                                                 # freshly in the game, so the setup may be due
+        if ($session.ChallengeSeenAt)
+        {
+            $waited = [int]((Get-Date) - $session.ChallengeSeenAt).TotalMinutes
+            Write-Log "$($session.Account) passed Roblox's verification after $waited min and is in the game"
+            $session.ChallengeSeenAt = $null
+            $session.ChallengeAlerted = $false
+        }
+    }
+
+    # Roblox answers the join with 403 and challengedByGcs when it wants a person to pass
+    # its check before letting the account in, and the client then shows the press and
+    # hold page. That looks exactly like being stuck on an error screen, so it used to be
+    # killed after 150 seconds and launched again, which gave whoever owns the account two
+    # and a half minutes to notice and no way to finish in time. On 05-10 one account was
+    # cut off three times in seven minutes that way, and every retry is another challenged
+    # join, which is what keeps Roblox asking.
+    if (-not $session.JoinedAt -and $text -match $challengePattern -and -not $session.ChallengeSeenAt)
+    {
+        $session.ChallengeSeenAt = Get-Date
     }
     if (-not $session.ServerAddress -and $joins.Count)
     {
@@ -2289,6 +2317,7 @@ function Get-SessionStatusText($accountName)
     if ($session.State -eq "Running")
     {
         if ($session.JoinedAt) { return "playing" }
+        if ($session.ChallengeSeenAt) { return "verify it by hand" }
         return "joining"
     }
     return $session.State
@@ -2322,7 +2351,8 @@ foreach ($accountName in $allAccounts)
                                  LastFailureReason = $null; ServerAddress = $null
                                  PendingDrop = $null; RelogCount = 0
                                  PendingAddress = $null; FocusRefusedSince = $null
-                                 FocusRefusedCount = 0 }
+                                 FocusRefusedCount = 0; ChallengeSeenAt = $null
+                                 ChallengeAlerted = $false; Account = $accountName }
 }
 
 $globalPaused = $false
@@ -2912,6 +2942,11 @@ function Update-StatusUi
         {
             $parts.Add("no drops yet")
         }
+        if ($detailSession.ChallengeSeenAt -and -not $detailSession.JoinedAt)
+        {
+            $waiting = [int]((Get-Date) - $detailSession.ChallengeSeenAt).TotalMinutes
+            $parts.Add("Roblox wants its press and hold check passed, waiting $waiting min, nothing will be relaunched until it is")
+        }
         if ($detailSession.RelogCount -gt 0)
         {
             $parts.Add("relogged $($detailSession.RelogCount)x without being relaunched")
@@ -3251,9 +3286,24 @@ function Invoke-SlowChecks
                         }
                     }
 
-                    # Deliberately outside the log check: a session with no usable log
-                    # still needs to know whether it got into the game
-                    if ($session.State -eq "Running" -and -not $session.JoinedAt -and $session.StartedAt -and
+                    # Waiting on a person, so the clock below does not apply: the window is
+                    # left exactly as it is for as long as it takes, and relaunching it
+                    # would only throw the page away and ask Roblox again.
+                    if ($session.ChallengeSeenAt -and -not $session.JoinedAt)
+                    {
+                        if (-not $session.ChallengeAlerted)
+                        {
+                            $session.ChallengeAlerted = $true
+                            Write-Log ("$accountName is being asked to pass Roblox's verification before it can " +
+                                       "join, so it is being left alone until someone does. Hold the button in " +
+                                       "its window and it will carry on by itself")
+                            Send-DiscordAlert "$accountName needs you to verify it" ("Roblox is asking for its " +
+                                "press and hold check before letting $accountName into the game.`n`nIts window " +
+                                "is being left open and nothing will be relaunched until it is done, because " +
+                                "every retry asks Roblox again and makes it more likely to keep asking.") $alertAmber $true
+                        }
+                    }
+                    elseif ($session.State -eq "Running" -and -not $session.JoinedAt -and $session.StartedAt -and
                         ((Get-Date) - $session.StartedAt).TotalSeconds -gt $joinTimeoutSeconds)
                     {
                         # The log is not the only evidence, and trusting it alone killed a
@@ -3340,7 +3390,7 @@ function Invoke-SlowChecks
                 # Still running after the checks above, so it is due a keystroke if it
                 # has gone quiet
                 if ($antiIdleMinutes -gt 0 -and -not $script:globalPaused -and -not $antiIdleSentThisPass -and
-                    $session.State -eq "Running" -and
+                    $session.State -eq "Running" -and -not $session.ChallengeSeenAt -and
                     $session.LastInputAt -and ((Get-Date) - $session.LastInputAt).TotalMinutes -ge (Get-AntiIdleInterval))
                 {
                     Send-AntiIdleInput $accountName

@@ -124,6 +124,18 @@ will not do it more than once every ten minutes.
 
 If you ever see it by hand, that is the fix: close every Roblox window, then start again.
 
+when Roblox asks you to verify an account
+
+Roblox sometimes refuses an account's join with a press and hold check. In the client log it looks like this:
+
+    status:403  url: .../v1/join-private-game  challengedByGcs
+
+The client then shows the verification page and waits. That looks exactly like being stuck on an error screen, so the watchdog used to close it after 150 seconds and launch a fresh one, which got challenged again: three times in seven minutes on one account. You had two and a half minutes to notice and no realistic way to finish in time, and every retry asks Roblox again, which makes it more likely to keep asking.
+
+Now it recognises the check, leaves the window exactly as it is for as long as it takes, and tells you which account needs you. Hold the button and it joins and carries on by itself. Nothing is relaunched in the meantime and it is left out of the anti-idle, so nothing steals focus from the page while you are using it. The window shows "verify it by hand" for that account.
+
+The watchdog does not and will not answer the check for you. It is there to confirm a person, and automated attempts at it are what make Roblox keep asking. If one account is asked every single time, verify its email and turn on 2FA, and log it in once by hand in Account Manager so it has a fresh session rather than a stale cookie.
+
 about relogs, which are not disconnects
 
 The game puts players back into the game by teleporting them. The client leaves the server,
