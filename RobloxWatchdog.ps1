@@ -72,6 +72,12 @@
 #                                         het spel zelf beslist het nu, die staat er bij een echte drop nooit.
 #                                         Verder: de waarschuwing dat focus geweigerd wordt komt nog een keer in
 #                                         plaats van elke minuut per account.
+#                                         Een teleport is in de praktijk een relog: het personage spawnt opnieuw en
+#                                         de inventaris staat weer in de hotbar, dus alles wat met de hand is
+#                                         neergezet moet opnieuw. Dat wordt nu zo genoemd en gemeld, voor main altijd
+#                                         en voor een groep van drie of meer tegelijk. De melding dat de setup weer
+#                                         nodig is hing eerst aan het hebben van een stappenlijst, waardoor wie het
+#                                         met de hand doet niets te horen kreeg.
 #
 #------------------------------------------------------------------------------------#
 
@@ -104,6 +110,7 @@ $joinAddressPattern = "Connection accepted from ([0-9.]+\|[0-9]+)"              
 $teleportMarker = "SessionTransitionFSM] Teleported."                                # the game moving the player, which no real drop ever logs
 $rejoinGraceSeconds = 30                                                             # a teleport is back in about 5 s, so this is plenty
 $migrationWitnesses = 2                                                              # accounts landing on the same new server before it counts as a move
+$relogWaveSize = 3                                                                   # accounts relogging together before it is worth saying so on its own
 $logLivenessSeconds = 120                                                            # a log written more recently than this belongs to a live client
 $watchdogVersion = "1.6.1"                                                           # the build stamps the exe with this too, and the exe wins at runtime
 $releaseApiUrl = "https://api.github.com/repos/FloSoftwareDev/roblox-watchdog/releases/latest"
@@ -2313,7 +2320,7 @@ foreach ($accountName in $allAccounts)
                                  DropCount = 0; LastDropAt = $null; LastDropReason = $null
                                  TotalUpSeconds = 0; StepsPending = $false; NeverJoinedCount = 0
                                  LastFailureReason = $null; ServerAddress = $null
-                                 PendingDrop = $null; TeleportCount = 0
+                                 PendingDrop = $null; RelogCount = 0
                                  PendingAddress = $null; FocusRefusedSince = $null
                                  FocusRefusedCount = 0 }
 }
@@ -2905,9 +2912,9 @@ function Update-StatusUi
         {
             $parts.Add("no drops yet")
         }
-        if ($detailSession.TeleportCount -gt 0)
+        if ($detailSession.RelogCount -gt 0)
         {
-            $parts.Add("teleported $($detailSession.TeleportCount)x and came back by itself")
+            $parts.Add("relogged $($detailSession.RelogCount)x without being relaunched")
         }
         if ($detailSession.FailureCount -gt 0)
         {
@@ -3054,6 +3061,12 @@ function Invoke-SlowChecks
     $droppedThisPass = New-Object System.Collections.Generic.List[string]
     $mainDroppedThisPass = $false
 
+    # A relog needs no relaunch, but the account comes back with its character respawned
+    # and its inventory in the hotbar, so anything that was set up by hand has to be done
+    # again. That is worth being told about even though nothing went wrong.
+    $reloggedThisPass = New-Object System.Collections.Generic.List[string]
+    $mainReloggedThisPass = $false
+
     # Focusing a window and holding a key takes most of a second, so only one account
     # gets poked per pass; several at once would visibly freeze the window
     $antiIdleSentThisPass = $false
@@ -3164,15 +3177,18 @@ function Invoke-SlowChecks
                                 # reset the main account over and over, back to spawn with its
                                 # rockets unplaced: 728 of the 785 disconnects in one log, 93%,
                                 # were this and every one of them cost a healthy session.
-                                $session.TeleportCount++
-                                # A teleport respawns the character, so the setup is due again just as much as
-                                # after a relaunch. Absorbing the teleport instead of relaunching took away the
-                                # only thing that used to notice, which left main standing at spawn with its
+                                $session.RelogCount++
+                                # A relog respawns the character, so the setup is due again just as much as
+                                # after a relaunch. Absorbing it instead of relaunching took away the only
+                                # thing that used to notice, which left main standing at spawn with its
                                 # rockets unplaced and nothing saying so.
                                 $session.StepsPending = $true
                                 $session.PendingDrop = $null
-                                Write-Log ("$accountName teleported and rejoined $($logged.RejoinAddress) by " +
-                                           "itself (reason $($logged.Reason)), so it is left alone")
+                                $reloggedThisPass.Add($accountName)
+                                if ($accountName -eq $mainAccount) { $mainReloggedThisPass = $true }
+                                Write-Log ("$accountName relogged into $($logged.RejoinAddress) by itself " +
+                                           "(reason $($logged.Reason)), so the client is left alone, but its " +
+                                           "character and inventory are back to the start")
                             }
                             elseif ($logged.RejoinAddress)
                             {
@@ -3199,14 +3215,13 @@ function Invoke-SlowChecks
                             # The rejoin turned up in a later read than the disconnect did
                             if (-not $session.ServerAddress -or $logged.RejoinAddress -eq $session.ServerAddress)
                             {
-                                $session.TeleportCount++
-                                # A teleport respawns the character, so the setup is due again just as much as
-                                # after a relaunch. Absorbing the teleport instead of relaunching took away the
-                                # only thing that used to notice, which left main standing at spawn with its
-                                # rockets unplaced and nothing saying so.
+                                $session.RelogCount++
                                 $session.StepsPending = $true
-                                Write-Log ("$accountName came back on $($logged.RejoinAddress) by itself after " +
-                                           "reason $($session.PendingDrop.Reason), so it is left alone")
+                                $reloggedThisPass.Add($accountName)
+                                if ($accountName -eq $mainAccount) { $mainReloggedThisPass = $true }
+                                Write-Log ("$accountName relogged into $($logged.RejoinAddress) by itself after " +
+                                           "reason $($session.PendingDrop.Reason), so the client is left alone, " +
+                                           "but its character and inventory are back to the start")
                             }
                             else
                             {
@@ -3371,12 +3386,10 @@ function Invoke-SlowChecks
         if ($witnesses -ge $migrationWitnesses)
         {
             $session.ServerAddress = $address
-            $session.TeleportCount++
-            # A teleport respawns the character, so the setup is due again just as much as
-            # after a relaunch. Absorbing the teleport instead of relaunching took away the
-            # only thing that used to notice, which left main standing at spawn with its
-            # rockets unplaced and nothing saying so.
+            $session.RelogCount++
             $session.StepsPending = $true
+            $reloggedThisPass.Add($accountName)
+            if ($accountName -eq $mainAccount) { $mainReloggedThisPass = $true }
             Write-Log ("$accountName moved to $address with $($witnesses - 1) other account$(if ($witnesses -ne 2) { 's' }), " +
                        "so the private server moved rather than the account dropping (reason $reason)")
         }
@@ -3430,9 +3443,11 @@ function Invoke-SlowChecks
         Send-DiscordAlert "Status" $summary $color
     }
 
-    # Main has just got back into the game, so the one-off setup is due again. Either it
-    # runs itself, or you get told to go and do it, depending on the setting.
+    # Main has just got back into the game, so the one-off setup is due again. With a step
+    # list it either runs itself or waits for Run to be pressed; with none, there is
+    # nothing to run and the notice below is the whole of it.
     $mainSession = $sessions[$mainAccount]
+    $stepsWaiting = $false
     if ($stepListText -and $mainSession.StepsPending -and $mainSession.State -eq "Running" -and $mainSession.JoinedAt)
     {
         $mainSession.StepsPending = $false
@@ -3442,9 +3457,33 @@ function Invoke-SlowChecks
         }
         else
         {
+            $stepsWaiting = $true
             Write-Log "$mainAccount is back in the game, the steps are waiting for you to press Run"
-            Send-DiscordAlert "Main is back in" ("It needs setting up again: walk into position and press Run in the " +
-                "watchdog window.") $alertAmber $true
+        }
+    }
+
+    # Nothing has gone wrong, so this is not an error, but the account comes back with its
+    # character respawned and its inventory in the hotbar. Anything placed by hand has to
+    # be placed again, which is worth being told. Main is always worth saying, because it
+    # is the one with a setup; a whole group relogging at once is worth saying because it
+    # means every one of them needs it. A single alt is logged and left at that.
+    if ($mainReloggedThisPass -or $reloggedThisPass.Count -ge $relogWaveSize)
+    {
+        $others = @($reloggedThisPass | Where-Object { $_ -ne $mainAccount })
+        if ($mainReloggedThisPass)
+        {
+            $tail = if ($stepsWaiting) { "Press Run in the watchdog window to set it up again." }
+                    elseif ($stepListText) { "The steps are running now." }
+                    else { "Its inventory is back in the hotbar, so the rockets need placing again." }
+            $withOthers = if ($others.Count) { "`n`nAlso relogged: $($others -join ', ')" } else { "" }
+            Send-DiscordAlert "Main relogged" ("$mainAccount went back into the game on its own, so it was not " +
+                "relaunched and nothing is broken.`n`n$tail$withOthers") $alertAmber $true
+        }
+        else
+        {
+            Send-DiscordAlert "$($reloggedThisPass.Count) accounts relogged" ("They went back into the game on " +
+                "their own, so none of them were relaunched.`n`n$($reloggedThisPass -join ', ')`n`nTheir characters " +
+                "and inventories are back to the start.") $alertAmber
         }
     }
 

@@ -59,6 +59,8 @@ Paste a webhook url into the settings and hit Test, which sends a message straig
 
 It only sends things worth looking at: it started, it crashed and whether it's coming back, an account has failed five launches in a row, memory ran out with nothing left to close, it's missing permissions, and several accounts dropping at once. Ordinary single disconnects are not sent, because there were 152 of them in four days and that would be noise rather than a notification.
 
+Relogs are sent for main, and for any group of three or more at once, because the character and inventory come back reset and that is work you have to redo. A single alt relogging only goes in the log. If you have a step list the message says whether it ran itself or is waiting for you to press Run.
+
 "Discord alerts every min" is a periodic status message and is off by default. The alerts above work whether or not you turn it on.
 
 if it crashes
@@ -122,11 +124,13 @@ will not do it more than once every ten minutes.
 
 If you ever see it by hand, that is the fix: close every Roblox window, then start again.
 
-about teleports, which are not disconnects
+about relogs, which are not disconnects
 
-The game moves players between rounds by teleporting them. The client leaves the server,
-writes a disconnect line in its log, and rejoins the same server about five seconds later
-without the window ever closing. Nothing is wrong and nothing needs doing.
+The game puts players back into the game by teleporting them. The client leaves the server,
+writes a disconnect line in its log, and rejoins about five seconds later without the window
+ever closing. Roblox calls it a teleport, but what the account gets is a relog: the character
+respawns and the inventory goes back into the hotbar, so anything you placed by hand has to
+be placed again. The client itself is fine and does not need relaunching.
 
 The watchdog used to read that disconnect line and close the client. 728 of the 785
 disconnects in four days of log were teleports, so most of what it did was close a healthy
