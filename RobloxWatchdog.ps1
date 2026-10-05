@@ -65,6 +65,13 @@
 #                                         De watchdog kijkt nu ook of er een nieuwere versie uit is en zegt dat op
 #                                         de strook bovenin, aanklikbaar naar de downloadpagina. Eens per zes uur,
 #                                         op de achtergrond, en als het mislukt gebeurt er gewoon niets.
+# 011          05-10-2026 Miniwar AFK FG  Roblox schrijft de rejoin en de disconnect vanuit verschillende threads, dus
+#                                         de volgorde is niet zeker. Bij een teleport van zes accounts stond bij een
+#                                         van hen de rejoin 20 ms voor de disconnect, en omdat er alleen erna werd
+#                                         gekeken werd die client wel gesloten en herstart. De teleportmelding van
+#                                         het spel zelf beslist het nu, die staat er bij een echte drop nooit.
+#                                         Verder: de waarschuwing dat focus geweigerd wordt komt nog een keer in
+#                                         plaats van elke minuut per account.
 #
 #------------------------------------------------------------------------------------#
 
@@ -94,10 +101,11 @@ $disconnectPattern = "Sending disconnect with reason: (\d+)"                    
 $ignoredDisconnectReasons = @()                                                      # never acted on at all; a teleport is recognised, not listed here
 $joinMarker = "Connection accepted"                                                  # logged only once the client is really in the game
 $joinAddressPattern = "Connection accepted from ([0-9.]+\|[0-9]+)"                   # the server it joined, so a rejoin can be compared with it
+$teleportMarker = "SessionTransitionFSM] Teleported."                                # the game moving the player, which no real drop ever logs
 $rejoinGraceSeconds = 30                                                             # a teleport is back in about 5 s, so this is plenty
 $migrationWitnesses = 2                                                              # accounts landing on the same new server before it counts as a move
 $logLivenessSeconds = 120                                                            # a log written more recently than this belongs to a live client
-$watchdogVersion = "1.6.0"                                                           # the build stamps the exe with this too, and the exe wins at runtime
+$watchdogVersion = "1.6.1"                                                           # the build stamps the exe with this too, and the exe wins at runtime
 $releaseApiUrl = "https://api.github.com/repos/FloSoftwareDev/roblox-watchdog/releases/latest"
 $releasePageUrl = "https://github.com/FloSoftwareDev/roblox-watchdog/releases/latest"
 $versionCheckHours = 6                                                               # it runs for days at a time, so once at the start is not enough
@@ -1667,10 +1675,33 @@ function Send-AntiIdleInput($accountName)
     {
         # Retry in a minute rather than fighting for focus on every tick
         $session.LastInputAt = (Get-Date).AddMinutes(1 - (Get-AntiIdleInterval))
-        Write-Log ("WARNING: could not focus $accountName after $attempts tries, anti-idle keystroke not " +
-                   "sent, retrying in 1 min")
-        Write-ElevationHint
+
+        # Said once, then not again until it works. Windows refuses focus for as long as
+        # someone is using the machine, and with six accounts each retrying every minute
+        # that was six identical warnings a minute: five and a half minutes of it on
+        # 05-10 buried the teleport lines that actually mattered.
+        if (-not $session.FocusRefusedSince)
+        {
+            $session.FocusRefusedSince = Get-Date
+            $session.FocusRefusedCount = 1
+            Write-Log ("WARNING: could not focus $accountName after $attempts tries, anti-idle keystroke not " +
+                       "sent, retrying every minute until it works")
+            Write-ElevationHint
+        }
+        else
+        {
+            $session.FocusRefusedCount++
+        }
         return
+    }
+
+    if ($session.FocusRefusedSince)
+    {
+        $refusedFor = [int]((Get-Date) - $session.FocusRefusedSince).TotalMinutes
+        Write-Log ("focus for $accountName came back after $($session.FocusRefusedCount) refusals over " +
+                   "$refusedFor min")
+        $session.FocusRefusedSince = $null
+        $session.FocusRefusedCount = 0
     }
 
     $scanCode = [byte]([Win32.Window]::MapVirtualKey($antiIdleVirtualKey, 0))          # games want a real scan code
@@ -2101,16 +2132,34 @@ function Update-SessionFromLog($session)
         break
     }
 
-    # A join after that line is the client putting itself back, which is the one thing
-    # that tells a teleport apart from a real drop
+    # A join after that line is the client putting itself back, which is what tells a
+    # teleport apart from a real drop
     $rejoinAddress = $null
     foreach ($join in $joins)
     {
         if ($join.Index -gt $reasonIndex) { $rejoinAddress = $join.Groups[1].Value }
     }
 
+    # Except that the order of those lines is a race. Roblox writes the join and the
+    # disconnects from different threads, and on 05-10 one account logged its join 20 ms
+    # before the disconnect rather than after:
+    #
+    #   14:20:52.823 thread 55e4  Connection accepted from 128.116.21.33|58590
+    #   14:20:52.843 thread 2494  Sending disconnect with reason: 285
+    #
+    # Looking only after the disconnect missed it, so a healthy client was closed and
+    # relaunched while its five siblings in the same teleport were left alone. The
+    # teleport marker settles it: the game logs that line when it moves a player and no
+    # real drop ever does, so with it present any join in the chunk is the client coming
+    # back, whichever order the two landed in.
+    $teleported = $text.Contains($teleportMarker)
+    if ($reason -and $teleported -and -not $rejoinAddress -and $joins.Count)
+    {
+        $rejoinAddress = $joins[$joins.Count - 1].Groups[1].Value
+    }
+
     if (-not $reason -and -not $rejoinAddress) { return $null }
-    return @{ Reason = $reason; RejoinAddress = $rejoinAddress }
+    return @{ Reason = $reason; RejoinAddress = $rejoinAddress; Teleported = $teleported }
 }
 
 function Find-LogByElimination($accountName)
@@ -2265,7 +2314,8 @@ foreach ($accountName in $allAccounts)
                                  TotalUpSeconds = 0; StepsPending = $false; NeverJoinedCount = 0
                                  LastFailureReason = $null; ServerAddress = $null
                                  PendingDrop = $null; TeleportCount = 0
-                                 PendingAddress = $null }
+                                 PendingAddress = $null; FocusRefusedSince = $null
+                                 FocusRefusedCount = 0 }
 }
 
 $globalPaused = $false
