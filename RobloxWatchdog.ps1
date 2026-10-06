@@ -102,6 +102,12 @@
 #                                         vergelijken en deed de hele functie niets. Nu wordt de echt gemeten
 #                                         rechthoek bewaard, ook na een geweigerde verplaatsing. Daarnaast twee
 #                                         knoppen om de hele indeling met groottes op te slaan en terug te zetten.
+# 015          06-10-2026 Miniwar AFK FG  Anti-idle nam alleen Space of een losse letter. Nu elke letter, cijfer of
+#                                         benoemde toets die de stappenlijst ook kent, of een plek in het venster om
+#                                         op te klikken, met een Pick knop die de toets of de plek voor je opschrijft.
+#                                         Ook opgelost: de muisbeweging in de agressieve stand las Left en Top van een
+#                                         rechthoek die X en Y heet, dus de cursor werd sinds 1.6.0 naar 0,0 gezet in
+#                                         plaats van naar het midden van het venster.
 #
 #------------------------------------------------------------------------------------#
 
@@ -137,7 +143,7 @@ $rejoinGraceSeconds = 30                                                        
 $migrationWitnesses = 2                                                              # accounts landing on the same new server before it counts as a move
 $relogWaveSize = 3                                                                   # accounts relogging together before it is worth saying so on its own
 $logLivenessSeconds = 120                                                            # a log written more recently than this belongs to a live client
-$watchdogVersion = "1.8.0"                                                           # the build stamps the exe with this too, and the exe wins at runtime
+$watchdogVersion = "1.9.0"                                                           # the build stamps the exe with this too, and the exe wins at runtime
 $releaseApiUrl = "https://api.github.com/repos/FloSoftwareDev/roblox-watchdog/releases/latest"
 $releasePageUrl = "https://github.com/FloSoftwareDev/roblox-watchdog/releases/latest"
 $versionCheckHours = 6                                                               # it runs for days at a time, so once at the start is not enough
@@ -589,6 +595,64 @@ function Get-StepKeyCode($keyName, $lineNumber)
     throw "line $lineNumber : '$keyName' is not a letter, a digit, or one of $(($named.Keys | Sort-Object) -join ', ')"
 }
 
+function Get-KeyNameFromCode($code)
+{
+    # The other direction from Get-StepKeyCode, so a picker can write back something the
+    # settings field accepts and a person can read
+    $named = @{ 0x20 = "space"; 0x10 = "shift"; 0x11 = "ctrl"; 0x12 = "alt"; 0x09 = "tab"
+                0x0D = "enter"; 0x1B = "esc"; 0x26 = "up"; 0x28 = "down"; 0x25 = "left"; 0x27 = "right" }
+    if ($named.ContainsKey([int]$code)) { return $named[[int]$code] }
+    if (($code -ge 0x30 -and $code -le 0x39) -or ($code -ge 0x41 -and $code -le 0x5A))
+    {
+        return [string][char][int]$code
+    }
+    return $null
+}
+
+function Get-AntiIdlePickableCodes
+{
+    # Only what can actually be sent: the letters, the digits and the named keys. Escape
+    # is left out because the picker uses it to cancel.
+    $codes = New-Object System.Collections.Generic.List[int]
+    0x20, 0x10, 0x11, 0x12, 0x09, 0x0D, 0x26, 0x28, 0x25, 0x27 | ForEach-Object { $codes.Add($_) }
+    0x30..0x39 | ForEach-Object { $codes.Add($_) }
+    0x41..0x5A | ForEach-Object { $codes.Add($_) }
+    return $codes
+}
+
+function Get-AntiIdleAction($setting)
+{
+    # The anti-idle used to take Space or a single letter and nothing else. It now takes
+    # anything the step list takes, which is any letter, digit or named key, plus a spot
+    # in the window to click. Same vocabulary as the step list on purpose: one thing to
+    # learn, and the picker writes it for you.
+    $trimmed = "$setting".Trim()
+    if (-not $trimmed) { throw "Anti-idle needs a key or a spot to click" }
+
+    if ($trimmed -match '^click\s+([0-9]*\.?[0-9]+)\s*,\s*([0-9]*\.?[0-9]+)$')
+    {
+        $fractionX = [double]$Matches[1]
+        $fractionY = [double]$Matches[2]
+        if ($fractionX -lt 0 -or $fractionX -gt 1 -or $fractionY -lt 0 -or $fractionY -gt 1)
+        {
+            throw "An anti-idle click has to be inside the window, so both numbers have to be between 0 and 1"
+        }
+        return [pscustomobject]@{ Kind = "click"; X = $fractionX; Y = $fractionY; Label = "a click at $fractionX,$fractionY" }
+    }
+
+    # Something meant as a click but written wrong would otherwise fall through to the
+    # key error and be told it is not a letter, which is no help at all
+    if ($trimmed -match '^click\b')
+    {
+        throw "An anti-idle click is written as 'click 0.5,0.6': two numbers between 0 and 1, which are fractions of the window"
+    }
+
+    # Get-StepKeyCode throws with the list of what it accepts, which is the message worth
+    # showing here too, so it is left to do the talking
+    $code = Get-StepKeyCode $trimmed 0
+    return [pscustomobject]@{ Kind = "key"; Key = [byte]$code; Label = $trimmed }
+}
+
 function Get-StepList($stepText)
 {
     # One step per line. Anything unrecognised is reported rather than ignored, so a
@@ -837,7 +901,87 @@ function Show-SettingsWindow($saved)
     Add-Row "Relog alts after minutes" "MaximumSessionMinutes" 20 $false
     Add-Row "Frame rate cap (0=off)" "FramerateCap" 20 $false
     Add-Row "Anti-idle every min (0=off)" "AntiIdleMinutes" 20 $false
-    Add-Row "Anti-idle key" "AntiIdleKey" 20 $false
+    Add-Row "Anti-idle key or spot" "AntiIdleKey" 20 $false
+
+    # Narrowed to leave room for the picker, the same way the step list does it
+    $antiIdleBox = $inputs["AntiIdleKey"]
+    $antiIdleBox.Size = New-Object System.Drawing.Size(252, 20)
+
+    $antiIdlePickButton = New-Object System.Windows.Forms.Button
+    $antiIdlePickButton.Text = "Pick"
+    $antiIdlePickButton.Location = New-Object System.Drawing.Point(506, ($antiIdleBox.Location.Y - 1))
+    $antiIdlePickButton.Size = New-Object System.Drawing.Size(62, 23)
+    Set-ThemedButton $antiIdlePickButton $false
+    $antiIdlePickButton.Add_Click({
+        # Either a key or a spot, whichever happens first. Someone asked for this because
+        # Space makes the character jump, and typing a key name by hand meant knowing
+        # which names were accepted.
+        $robloxWindow = $null
+        foreach ($candidate in (Get-Process $processName -ErrorAction SilentlyContinue | Sort-Object StartTime))
+        {
+            $candidate.Refresh()
+            if ($candidate.MainWindowHandle -ne [IntPtr]::Zero) { $robloxWindow = $candidate; break }
+        }
+        $windowRect = if ($robloxWindow) { Get-WindowRectangle $robloxWindow.MainWindowHandle } else { $null }
+
+        $clickPart = if ($windowRect) { ", or click a spot inside the Roblox window" }
+                     else { ". Open a Roblox window first if you want to pick a spot to click instead" }
+        [System.Windows.Forms.MessageBox]::Show(
+            "Press the key you want to use$clickPart.`r`n`r`nPress Escape to cancel.",
+            "Pick a key or a spot", [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+
+        # Wait for the hand to come off whatever dismissed that dialog, or the OK click
+        # and the Enter key get picked up as the answer
+        $settle = (Get-Date).AddSeconds(3)
+        $codes = Get-AntiIdlePickableCodes
+        while ((Get-Date) -lt $settle)
+        {
+            $anythingDown = ([Win32.Window]::GetAsyncKeyState(0x01) -lt 0)
+            foreach ($code in $codes)
+            {
+                if ([Win32.Window]::GetAsyncKeyState($code) -lt 0) { $anythingDown = $true; break }
+            }
+            if (-not $anythingDown) { break }
+            Start-Sleep -Milliseconds 40
+        }
+
+        $deadline = (Get-Date).AddSeconds(30)
+        while ((Get-Date) -lt $deadline)
+        {
+            if ([Win32.Window]::GetAsyncKeyState(0x1B) -lt 0) { return }               # VK_ESCAPE cancels
+
+            foreach ($code in $codes)
+            {
+                if ([Win32.Window]::GetAsyncKeyState($code) -ge 0) { continue }
+                $name = Get-KeyNameFromCode $code
+                if (-not $name) { continue }
+                $antiIdleBox.Text = $name
+                while ([Win32.Window]::GetAsyncKeyState($code) -lt 0) { Start-Sleep -Milliseconds 40 }
+                return
+            }
+
+            if ($windowRect -and [Win32.Window]::GetAsyncKeyState(0x01) -lt 0)         # VK_LBUTTON
+            {
+                $point = New-Object POINT
+                if (-not [WinPos]::GetCursorPos([ref]$point)) { return }
+                $fractionX = [math]::Round((($point.X - $windowRect.X) / $windowRect.Width), 4)
+                $fractionY = [math]::Round((($point.Y - $windowRect.Y) / $windowRect.Height), 4)
+                if ($fractionX -lt 0 -or $fractionX -gt 1 -or $fractionY -lt 0 -or $fractionY -gt 1)
+                {
+                    [System.Windows.Forms.MessageBox]::Show("That click was outside the Roblox window.",
+                        "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
+                        [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+                    return
+                }
+                $antiIdleBox.Text = "click $fractionX,$fractionY"
+                while ([Win32.Window]::GetAsyncKeyState(0x01) -lt 0) { Start-Sleep -Milliseconds 50 }
+                return
+            }
+            Start-Sleep -Milliseconds 40
+        }
+    })
+    $form.Controls.Add($antiIdlePickButton)
     Add-Row "Close strays after min (0=off)" "ReapStrayMinutes" 20 $false
     Add-Row "Discord alerts every min (0=off)" "DiscordSummaryMinutes" 20 $false
     Add-Row "Discord id to ping for main" "DiscordPingId" 20 $false
@@ -1166,7 +1310,13 @@ function Test-Settings($settings)
     if ($settings.AntiIdleMinutes -notmatch '^\d{1,2}$') { throw "Anti-idle minutes must be a number (0 to turn it off)" }
     $idle = [int]$settings.AntiIdleMinutes
     if ($idle -ne 0 -and ($idle -lt 1 -or $idle -gt 18)) { throw "Anti-idle minutes must be 0, or between 1 and 18 (Roblox kicks at 20)" }
-    if ($settings.AntiIdleKey -notmatch '^(Space|[A-Za-z])$') { throw "Anti-idle key must be Space or a single letter" }
+    if ($idle -gt 0)
+    {
+        # Only when it is on: with anti-idle off the field is allowed to be anything,
+        # including empty
+        try { $null = Get-AntiIdleAction $settings.AntiIdleKey }
+        catch { throw "Anti-idle: $($_.Exception.Message -replace '^line 0 : ', '')" }
+    }
 
     # Grace period before an untracked windowless client counts as a stray. Must be
     # longer than a launch takes, or a client still starting up would be killed
@@ -1253,7 +1403,7 @@ $antiIdleMinutes = [int]$settings.AntiIdleMinutes
 $antiIdleKey = $settings.AntiIdleKey
 $aggressiveAntiIdle = ($settings.AggressiveAntiIdle -eq "True")
 # A-Z virtual key codes are the same numbers as their uppercase characters
-$antiIdleVirtualKey = if ($antiIdleKey -eq "Space") { [byte]0x20 } else { [byte][char]([string]$antiIdleKey).ToUpper() }
+$antiIdleAction = try { Get-AntiIdleAction $antiIdleKey } catch { $null }
 $reapStrayMinutes = [int]$settings.ReapStrayMinutes
 $useAllMonitors = ($settings.UseAllMonitors -ne "False")
 $discordWebhookUrl = $settings.DiscordWebhookUrl
@@ -1798,6 +1948,48 @@ function Get-AntiIdleInterval
 
 }
 
+function Send-AntiIdleKey($code)
+{
+    $scanCode = [byte]([Win32.Window]::MapVirtualKey($code, 0))                       # games want a real scan code
+    [Win32.Window]::keybd_event($code, $scanCode, 0, [UIntPtr]::Zero)                 # key down
+    Start-Sleep -Milliseconds 80
+    [Win32.Window]::keybd_event($code, $scanCode, 2, [UIntPtr]::Zero)                 # KEYEVENTF_KEYUP
+}
+
+function Send-AntiIdleClick($handle, $action)
+{
+    # Fractions of the window rather than screen pixels, so the same spot works whichever
+    # monitor the window is on and whatever size the tile is. Same as a step list click.
+    $windowRect = Get-WindowRectangle $handle
+    if (-not $windowRect) { return $false }
+    $targetX = [int]($windowRect.X + ($windowRect.Width * $action.X))
+    $targetY = [int]($windowRect.Y + ($windowRect.Height * $action.Y))
+    [Win32.Window]::SetCursorPos($targetX, $targetY) | Out-Null
+    Start-Sleep -Milliseconds 40
+    [Win32.Window]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)                     # left down
+    Start-Sleep -Milliseconds 50
+    [Win32.Window]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)                     # left up
+    return $true
+}
+
+function Send-AntiIdleAction($handle)
+{
+    # Whatever the setting asked for. Falls back to Space only if the setting could not
+    # be read at all, so a broken field still keeps the clients awake.
+    if (-not $antiIdleAction)
+    {
+        Send-AntiIdleKey ([byte]0x20)
+        return "pressed Space"
+    }
+    if ($antiIdleAction.Kind -eq "click")
+    {
+        if (Send-AntiIdleClick $handle $antiIdleAction) { return "clicked $($antiIdleAction.X),$($antiIdleAction.Y)" }
+        return $null
+    }
+    Send-AntiIdleKey $antiIdleAction.Key
+    return "pressed $($antiIdleAction.Label)"
+}
+
 function Send-AntiIdleInput($accountName)
 {
     # Roblox kicks a client after 20 minutes without input, and it only counts input
@@ -1861,8 +2053,6 @@ function Send-AntiIdleInput($accountName)
         $session.FocusRefusedCount = 0
     }
 
-    $scanCode = [byte]([Win32.Window]::MapVirtualKey($antiIdleVirtualKey, 0))          # games want a real scan code
-
     if ($aggressiveAntiIdle)
     {
         # One tap is enough for Roblox's own 20 minute timer, but a game can watch for
@@ -1877,29 +2067,35 @@ function Send-AntiIdleInput($accountName)
         $rectangle = Get-WindowRectangle $handle
         if ($rectangle)
         {
-            # Inside the window, so the move cannot land on another client
-            $centreX = [int]($rectangle.Left + ($rectangle.Right - $rectangle.Left) / 2)
-            $centreY = [int]($rectangle.Top + ($rectangle.Bottom - $rectangle.Top) / 2)
+            # Inside the window, so the move cannot land on another client.
+            #
+            # This read .Left and .Right and .Top and .Bottom, which Get-WindowRectangle
+            # does not have: it returns X, Y, Width and Height. Every one of them was
+            # $null, so the centre worked out as 0,0 and the cursor was being parked in
+            # the corner of the screen instead of in the window.
+            $centreX = [int]($rectangle.X + ($rectangle.Width / 2))
+            $centreY = [int]($rectangle.Y + ($rectangle.Height / 2))
             [Win32.Window]::SetCursorPos($centreX, $centreY) | Out-Null
             Start-Sleep -Milliseconds 40
             [Win32.Window]::SetCursorPos($centreX + 12, $centreY + 8) | Out-Null
         }
     }
 
-    [Win32.Window]::keybd_event($antiIdleVirtualKey, $scanCode, 0, [UIntPtr]::Zero)    # key down
-    Start-Sleep -Milliseconds 80
-    [Win32.Window]::keybd_event($antiIdleVirtualKey, $scanCode, 2, [UIntPtr]::Zero)    # KEYEVENTF_KEYUP
+    $did = Send-AntiIdleAction $handle
+    if (-not $did)
+    {
+        Write-Log "WARNING: could not read $accountName's window to click in, anti-idle skipped"
+        return
+    }
 
     if ($aggressiveAntiIdle)
     {
         Start-Sleep -Milliseconds 60
-        [Win32.Window]::keybd_event($antiIdleVirtualKey, $scanCode, 0, [UIntPtr]::Zero)
-        Start-Sleep -Milliseconds 80
-        [Win32.Window]::keybd_event($antiIdleVirtualKey, $scanCode, 2, [UIntPtr]::Zero)
+        $null = Send-AntiIdleAction $handle
     }
 
     $session.LastInputAt = Get-Date
-    $how = if ($aggressiveAntiIdle) { "walked and pressed $antiIdleKey twice" } else { "pressed $antiIdleKey" }
+    $how = if ($aggressiveAntiIdle) { "walked and $did twice" } else { $did }
     Write-Log ("anti-idle: $how in $accountName" +
                $(if ($attempt -gt 2) { " (focus took $($attempt - 1) tries)" } else { "" }))
 
@@ -3051,7 +3247,7 @@ $settingsButton.Add_Click({
     $script:antiIdleMinutes = [int]$updated.AntiIdleMinutes
     $script:antiIdleKey = $updated.AntiIdleKey
     $script:aggressiveAntiIdle = ($updated.AggressiveAntiIdle -eq "True")
-    $script:antiIdleVirtualKey = if ($updated.AntiIdleKey -eq "Space") { [byte]0x20 } else { [byte][char]([string]$updated.AntiIdleKey).ToUpper() }
+    $script:antiIdleAction = try { Get-AntiIdleAction $updated.AntiIdleKey } catch { $null }
     $script:reapStrayMinutes = [int]$updated.ReapStrayMinutes
     $script:closeOtherClients = ($updated.CloseOtherClients -ne "False")
     $script:adoptOpenClients = ($updated.AdoptOpenClients -eq "True")
