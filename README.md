@@ -107,7 +107,11 @@ Accounts are shared out over your monitors in proportion to how much screen area
 
 On a 2560x1440 plus a 1920x1080, six accounts go from 853x700 each to four at 1280x720 and two at 960x1080, which is roughly 60% more room per window.
 
-Drag a window somewhere and that's where that account goes from then on, instead of back into the grid. Roblox nudging its own window by a few pixels doesn't count as you moving it. Untick "Put windows back where I dragged them" to go back to the grid and forget the saved spots.
+Two buttons, Save layout and Load layout. Save writes down where every open window is and how big it is; Load puts them all back. They work whether or not the tickbox below is on, so if you would rather arrange the windows yourself and press a button than have it guess, that is the way to do it.
+
+"Put windows back where I dragged them" is the automatic version: drag or resize a window and that becomes where that account goes from then on, instead of back into the grid. Untick it and launches use the grid again. Unticking no longer deletes anything, so a layout you saved on purpose stays and Load layout still works; re-ticking brings it back.
+
+If this was not working for you before, there were three reasons and all three are fixed. It only ever compared where the window was, never how big it was, so resizing one was never noticed and it went back to its old size on the next launch. It needed a 60 pixel drag before it counted, so nudging a window into place was thrown away. And worst, it compared against the position it had asked for rather than where the window actually ended up, which meant that if moving the window was denied, and that happens whenever the clients run as administrator and the watchdog does not, there was nothing to compare against and the whole feature silently did nothing at all.
 
 Untick "Spread the windows over all monitors" to keep everything on the main screen, which is handy if you are recording or want the second screen for something else.
 

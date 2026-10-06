@@ -94,6 +94,14 @@
 #                                         eigen logbestand dat via de starttijd van het proces wordt gevonden.
 #                                         Sluiten en overnemen zijn tegenpolen, dus in het instellingenvenster kan er
 #                                         maar een van de twee aan staan: de ander gaat uit zodra je er een aanzet.
+# 014          06-10-2026 Miniwar AFK FG  Vensterposities onthouden werkte voor veel mensen niet. Drie oorzaken: de
+#                                         grootte werd nooit vergeleken, dus alleen slepen werd gezien en niet het
+#                                         veranderen van de grootte; er was 60 pixels nodig voordat slepen meetelde;
+#                                         en als het verplaatsen werd geweigerd, wat gebeurt als de clients als
+#                                         administrator draaien en de watchdog niet, bleef er niets om tegen te
+#                                         vergelijken en deed de hele functie niets. Nu wordt de echt gemeten
+#                                         rechthoek bewaard, ook na een geweigerde verplaatsing. Daarnaast twee
+#                                         knoppen om de hele indeling met groottes op te slaan en terug te zetten.
 #
 #------------------------------------------------------------------------------------#
 
@@ -114,7 +122,7 @@ $launchTimeoutSeconds = 90                                                      
 $logTimeoutSeconds = 30                                                              # no log file by then = failed launch
 $windowTimeoutSeconds = 60                                                           # no window by then = leave it untiled
 $windowSettleSeconds = 5                                                             # let Roblox restore its own size before moving it
-$manualMoveThreshold = 60                                                            # further than Roblox's own nudging, so only a real drag counts
+$manualMoveThreshold = 12                                                            # further than Roblox's own nudging, so only a real drag counts
 $stepGapMilliseconds = 200                                                           # between steps with no explicit wait of their own
 $stepRun = @{ Active = $false; Steps = @(); Index = 0; NextAt = $null; Reason = $null; HeldKey = $null }
 $maximumLaunchFailures = 5                                                           # log loudly after this many failed launches in a row
@@ -129,7 +137,7 @@ $rejoinGraceSeconds = 30                                                        
 $migrationWitnesses = 2                                                              # accounts landing on the same new server before it counts as a move
 $relogWaveSize = 3                                                                   # accounts relogging together before it is worth saying so on its own
 $logLivenessSeconds = 120                                                            # a log written more recently than this belongs to a live client
-$watchdogVersion = "1.7.1"                                                           # the build stamps the exe with this too, and the exe wins at runtime
+$watchdogVersion = "1.8.0"                                                           # the build stamps the exe with this too, and the exe wins at runtime
 $releaseApiUrl = "https://api.github.com/repos/FloSoftwareDev/roblox-watchdog/releases/latest"
 $releasePageUrl = "https://github.com/FloSoftwareDev/roblox-watchdog/releases/latest"
 $versionCheckHours = 6                                                               # it runs for days at a time, so once at the start is not enough
@@ -1319,10 +1327,12 @@ function Get-TilingScreens
              Sort-Object @{ Expression = { -not $_.Primary } }, @{ Expression = { $_.Bounds.X } })
 }
 
-function Get-SavedWindowPositions
+function Read-WindowLayoutFile
 {
+    # Whatever is on disk, regardless of the setting. Saving and loading a layout by hand
+    # has to work even with automatic remembering turned off, which is the whole point of
+    # the buttons.
     $positions = @{}
-    if (-not $rememberWindowPositions) { return $positions }
     try
     {
         if (Test-Path $positionsPath)
@@ -1339,6 +1349,78 @@ function Get-SavedWindowPositions
         Write-Log "WARNING: could not read the saved window positions: $($_.Exception.Message)"
     }
     return $positions
+}
+
+function Get-SavedWindowPositions
+{
+    # What a launch should put the window back to: nothing, unless remembering is on
+    if (-not $rememberWindowPositions) { return @{} }
+    return Read-WindowLayoutFile
+}
+
+function Get-ClientWindowRectangle($session)
+{
+    # The window as it actually is now, or $null if there is nothing to read
+    $process = Get-SessionProcess $session
+    if (-not $process) { return $null }
+    $process.Refresh()
+    if ($process.MainWindowHandle -eq [IntPtr]::Zero) { return $null }
+    $rectangle = Get-WindowRectangle $process.MainWindowHandle
+    if (-not $rectangle) { return $null }
+    return "$($rectangle.X),$($rectangle.Y),$($rectangle.Width),$($rectangle.Height)"
+}
+
+function Save-WindowLayout
+{
+    # Every window where it stands, size included, written in one go. Asked for by hand,
+    # so it does not care whether automatic remembering is on and it does not care
+    # whether the watchdog put the window there or someone dragged it.
+    $positions = Read-WindowLayoutFile
+    $saved = 0
+    foreach ($accountName in $allAccounts)
+    {
+        $rectangleText = Get-ClientWindowRectangle $sessions[$accountName]
+        if (-not $rectangleText) { continue }
+        $positions[$accountName] = $rectangleText
+        $sessions[$accountName].AppliedRect = $rectangleText                          # so a later drag is measured from here
+        $saved++
+    }
+    if (-not $saved)
+    {
+        Write-Log "nothing to save: none of the accounts has a window open"
+        return 0
+    }
+    try
+    {
+        $positions | ConvertTo-Json | Set-Content $positionsPath -Encoding UTF8
+        Write-Log "saved where $saved window$(if ($saved -ne 1) { 's' }) and how big they are"
+    }
+    catch
+    {
+        Write-Log "WARNING: could not save the window layout: $($_.Exception.Message)"
+        return 0
+    }
+    return $saved
+}
+
+function Restore-WindowLayout
+{
+    # Put them back where they were saved, now, rather than waiting for a relaunch
+    $positions = Read-WindowLayoutFile
+    if (-not $positions.Count)
+    {
+        Write-Log "no saved window layout to load yet, press Save layout first"
+        return 0
+    }
+    $moved = 0
+    foreach ($accountName in $allAccounts)
+    {
+        if (-not $positions.ContainsKey($accountName)) { continue }
+        if ($sessions[$accountName].ProcessId -eq 0) { continue }
+        if (Set-ClientWindow $accountName $sessions[$accountName].ProcessId $positions) { $moved++ }
+    }
+    Write-Log "loaded the saved layout into $moved window$(if ($moved -ne 1) { 's' })"
+    return $moved
 }
 
 function Save-WindowPosition($accountName, $rectangleText)
@@ -1415,7 +1497,7 @@ function Get-SlotRectangle($slotIndex)
                               ScreenNumber = 1; ScreenCount = $screens.Count }
 }
 
-function Set-ClientWindow($accountName, $processId)
+function Set-ClientWindow($accountName, $processId, $layout)
 {
     # Nothing here waits: the Tiling state does the waiting, one step per tick, so the
     # status window stays responsive instead of freezing for a minute per launch
@@ -1434,7 +1516,9 @@ function Set-ClientWindow($accountName, $processId)
     $tileHeight = $slot.Height
     $fromMemory = $false
 
-    $savedPositions = Get-SavedWindowPositions
+    # Handed in by Load layout, which ignores the setting; otherwise whatever a launch
+    # should use, which does not
+    $savedPositions = if ($layout) { $layout } else { Get-SavedWindowPositions }
     if ($savedPositions.ContainsKey($accountName))
     {
         $parts = $savedPositions[$accountName] -split ','
@@ -1460,8 +1544,12 @@ function Set-ClientWindow($accountName, $processId)
 
     if ($moved -and $readBack -and $offBy -le 40)
     {
-        # Remembered so a later manual drag can be told apart from where we put it
-        $sessions[$accountName].AppliedRect = "$x,$y,$tileWidth,$tileHeight"
+        # Where it really ended up, not what was asked for. Roblox settles its window a
+        # little after being moved, and storing the request meant the window could sit
+        # tens of pixels from what was recorded, which a drag then had to beat before it
+        # counted at all.
+        $sessions[$accountName].AppliedRect = "$($rect.Left),$($rect.Top)," +
+                                              "$($rect.Right - $rect.Left),$($rect.Bottom - $rect.Top)"
         $where = if ($fromMemory) { "where you left it" } else
         {
             "slot $slotIndex" + $(if ($slot.ScreenCount -gt 1) { " on screen $($slot.ScreenNumber)" } else { "" })
@@ -1470,6 +1558,16 @@ function Set-ClientWindow($accountName, $processId)
         return $true
     }
 
+    # Taking note of where it actually is, even though moving it failed. Without this,
+    # AppliedRect stayed empty and the whole "put it back where I dragged it" feature
+    # quietly did nothing for anyone whose clients are elevated: the drag check needs
+    # something to compare against, and a denied move left it with nothing. That is the
+    # likeliest reason it was reported as not working at all.
+    if ($readBack)
+    {
+        $sessions[$accountName].AppliedRect = "$($rect.Left),$($rect.Top)," +
+                                              "$($rect.Right - $rect.Left),$($rect.Bottom - $rect.Top)"
+    }
     Write-Log "WARNING: $accountName (PID $processId) did not move (asked for $x,$y, it sits at $($rect.Left),$($rect.Top))"
     Write-ElevationHint
     return $false
@@ -2683,6 +2781,30 @@ $pauseAccountButton.Enabled = $false
 Set-ThemedButton $pauseAccountButton $false
 $statusForm.Controls.Add($pauseAccountButton)
 
+$saveLayoutButton = New-Object System.Windows.Forms.Button
+$saveLayoutButton.Text = "Save layout"
+$saveLayoutButton.Location = New-Object System.Drawing.Point(310, 424)
+$saveLayoutButton.Size = New-Object System.Drawing.Size(120, 27)
+Set-ThemedButton $saveLayoutButton $false
+$statusForm.Controls.Add($saveLayoutButton)
+
+$loadLayoutButton = New-Object System.Windows.Forms.Button
+$loadLayoutButton.Text = "Load layout"
+$loadLayoutButton.Location = New-Object System.Drawing.Point(436, 424)
+$loadLayoutButton.Size = New-Object System.Drawing.Size(120, 27)
+Set-ThemedButton $loadLayoutButton $false
+$statusForm.Controls.Add($loadLayoutButton)
+
+$saveLayoutButton.Add_Click({
+    $saved = Save-WindowLayout
+    if ($saved) { $headline.Text = "saved $saved window$(if ($saved -ne 1) { 's' })" }
+})
+
+$loadLayoutButton.Add_Click({
+    $moved = Restore-WindowLayout
+    if ($moved) { $headline.Text = "put $moved window$(if ($moved -ne 1) { 's' }) back" }
+})
+
 $settingsButton = New-Object System.Windows.Forms.Button
 $settingsButton.Text = "Settings"
 $settingsButton.Location = New-Object System.Drawing.Point(14, 468)
@@ -2940,11 +3062,13 @@ $settingsButton.Add_Click({
     $script:rememberWindowPositions = ($updated.RememberWindowPositions -ne "False")
     $script:stepListText = $updated.StepList
     $script:runStepsOnRejoin = ($updated.RunStepsOnRejoin -eq "True")
-    if (-not $script:rememberWindowPositions -and (Test-Path $positionsPath))
+    if (-not $script:rememberWindowPositions)
     {
-        # Turning it off forgets them, otherwise they would come back on re-ticking it
-        Remove-Item $positionsPath -Force -ErrorAction SilentlyContinue
-        Write-Log "forgot the saved window positions"
+        # The file is kept and simply not used, rather than deleted. It used to be
+        # deleted here, which would now throw away a layout saved on purpose with the
+        # button. Unticking means back to the grid; Load layout still works, and
+        # re-ticking brings the layout back.
+        Write-Log "windows go back to the grid on launch; the saved layout is kept and Load layout still uses it"
     }
     Write-Log "settings saved and applied"
 
@@ -3505,9 +3629,18 @@ function Invoke-SlowChecks
                             $current = Get-WindowRectangle $liveProcess.MainWindowHandle
                             if ($current)
                             {
+                                # Size as well as position: resizing a window without
+                                # moving its corner was never noticed, so a window made
+                                # bigger went back to its old size on the next launch
                                 $applied = $session.AppliedRect -split ','
                                 $movedBy = [math]::Max([math]::Abs($current.X - [int]$applied[0]),
                                                        [math]::Abs($current.Y - [int]$applied[1]))
+                                if ($applied.Count -eq 4)
+                                {
+                                    $movedBy = [math]::Max($movedBy,
+                                        [math]::Max([math]::Abs($current.Width - [int]$applied[2]),
+                                                    [math]::Abs($current.Height - [int]$applied[3])))
+                                }
                                 if ($movedBy -gt $manualMoveThreshold)
                                 {
                                     $session.AppliedRect = "$($current.X),$($current.Y),$($current.Width),$($current.Height)"
