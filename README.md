@@ -93,7 +93,9 @@ Roblox kicks a client after 20 minutes without input, and it only counts input w
 
 Default is every 15 minutes per account, and each account is on its own timer starting from when it joined, so they don't all do it at once. Max is 18, because 20 is when Roblox pulls the plug. Set it to 0 to turn it off.
 
-"Aggressive anti-idle" does it twice as often (15 becomes 7), holds a movement key so the character actually walks, nudges the mouse inside the window, and presses the key twice instead of once. Use it if a game has its own idle check that watches more than keyboard input. It costs a bit more focus flicker, which is why it is off by default.
+"Aggressive anti-idle" ignores the key or spot above and does its own thing instead: twice as often (15 becomes 7), holds W so the character actually walks, nudges the mouse inside the window, and jumps. A character that moves and jumps is the harder thing to mistake for someone sitting still, which is the point of it. It costs a bit more focus flicker, which is why it is off by default.
+
+So the key or spot you picked applies when this is off. With it on, what you picked is left alone and not used.
 
 Getting focus is the weak point, not the keystroke. Windows refused it on 1301 of 5867 attempts in four days of log, 22%, mostly while someone was actually using the PC, and every refusal used to mean waiting another minute. It now asks again straight away, twice normally and four times in aggressive mode, before giving up and trying in a minute.
 

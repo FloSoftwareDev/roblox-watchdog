@@ -113,6 +113,9 @@
 #                                         knop opnieuw ingedrukt. Knop staat nu uit tijdens het kiezen. Verder kan
 #                                         er nu ctrl, alt of shift bij gehouden worden, en bij het starten gaat er
 #                                         geen Discord bericht meer uit tenzij het na een crash zelf terugkwam.
+# 017          06-10-2026 Miniwar AFK FG  Agressieve anti-idle negeert nu de ingestelde toets of plek en loopt en
+#                                         springt in plaats daarvan. Een personage dat beweegt en springt is
+#                                         moeilijker te verwarren met iemand die stilzit dan een losse toets.
 #
 #------------------------------------------------------------------------------------#
 
@@ -148,7 +151,7 @@ $rejoinGraceSeconds = 30                                                        
 $migrationWitnesses = 2                                                              # accounts landing on the same new server before it counts as a move
 $relogWaveSize = 3                                                                   # accounts relogging together before it is worth saying so on its own
 $logLivenessSeconds = 120                                                            # a log written more recently than this belongs to a live client
-$watchdogVersion = "1.9.1"                                                           # the build stamps the exe with this too, and the exe wins at runtime
+$watchdogVersion = "1.10.0"                                                           # the build stamps the exe with this too, and the exe wins at runtime
 $releaseApiUrl = "https://api.github.com/repos/FloSoftwareDev/roblox-watchdog/releases/latest"
 $releasePageUrl = "https://github.com/FloSoftwareDev/roblox-watchdog/releases/latest"
 $versionCheckHours = 6                                                               # it runs for days at a time, so once at the start is not enough
@@ -1223,7 +1226,7 @@ function Show-SettingsWindow($saved)
     $rowTop += 26
 
     $aggressiveIdleBox = New-Object System.Windows.Forms.CheckBox
-    $aggressiveIdleBox.Text = "Aggressive anti-idle (more input, twice as often)"
+    $aggressiveIdleBox.Text = "Aggressive anti-idle: walk and jump, ignores the key"
     $aggressiveIdleBox.Location = New-Object System.Drawing.Point(248, $rowTop)
     $aggressiveIdleBox.Size = New-Object System.Drawing.Size(320, 20)
     $aggressiveIdleBox.Checked = ($saved["AggressiveAntiIdle"] -eq "True")
@@ -2195,9 +2198,11 @@ function Send-AntiIdleInput($accountName)
 
     if ($aggressiveAntiIdle)
     {
-        # One tap is enough for Roblox's own 20 minute timer, but a game can watch for
-        # more than that, so this moves the character and the mouse as well. W is held
-        # rather than tapped because a tap can be swallowed between frames.
+        # Aggressive ignores whatever the key or spot is set to and walks and jumps
+        # instead. One tap of anything is enough for Roblox's own 20 minute timer, but a
+        # game can watch for more than that, and a character that moves and jumps is the
+        # harder thing to mistake for someone sitting still. W is held rather than tapped
+        # because a tap can be swallowed between frames.
         $moveKey = [byte]0x57                                                          # W
         $moveScan = [byte]([Win32.Window]::MapVirtualKey($moveKey, 0))
         [Win32.Window]::keybd_event($moveKey, $moveScan, 0, [UIntPtr]::Zero)
@@ -2219,23 +2224,24 @@ function Send-AntiIdleInput($accountName)
             Start-Sleep -Milliseconds 40
             [Win32.Window]::SetCursorPos($centreX + 12, $centreY + 8) | Out-Null
         }
-    }
 
-    $did = Send-AntiIdleAction $handle
-    if (-not $did)
-    {
-        Write-Log "WARNING: could not read $accountName's window to click in, anti-idle skipped"
-        return
+        # Space, not the setting. Pressed once: a second jump 60 milliseconds later lands
+        # while the character is still in the air and does nothing at all.
+        Send-AntiIdleKey ([byte]0x20) @()
+        $did = "walked and jumped"
     }
-
-    if ($aggressiveAntiIdle)
+    else
     {
-        Start-Sleep -Milliseconds 60
-        $null = Send-AntiIdleAction $handle
+        $did = Send-AntiIdleAction $handle
+        if (-not $did)
+        {
+            Write-Log "WARNING: could not read $accountName's window to click in, anti-idle skipped"
+            return
+        }
     }
 
     $session.LastInputAt = Get-Date
-    $how = if ($aggressiveAntiIdle) { "walked and $did twice" } else { $did }
+    $how = $did
     Write-Log ("anti-idle: $how in $accountName" +
                $(if ($attempt -gt 2) { " (focus took $($attempt - 1) tries)" } else { "" }))
 
