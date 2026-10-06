@@ -99,7 +99,9 @@ Getting focus is the weak point, not the keystroke. Windows refused it on 1301 o
 
 Default is Space, which is the most reliable thing to register as input but does make your character jump. Press Pick next to the field and then press whatever key you would rather use, or click a spot inside a Roblox window to have it click there instead of pressing anything. Pick writes it into the field for you.
 
-Typed by hand the field takes any letter, any digit, or space, shift, ctrl, alt, tab, enter, up, down, left or right. The same names the step list uses. A spot is written "click 0.5,0.6", which is fractions of the window rather than screen pixels, so it keeps working whichever monitor the window is on and whatever size it is.
+Hold ctrl, alt or shift while you press the key and you get the combination, like "ctrl+e". Holding a modifier on its own and letting go gives you just that modifier.
+
+Typed by hand the field takes any letter, any digit, or space, shift, ctrl, alt, tab, enter, up, down, left or right, optionally with ctrl, alt or shift in front of it joined by a plus. The same names the step list uses. A spot is written "click 0.5,0.6", which is fractions of the window rather than screen pixels, so it keeps working whichever monitor the window is on and whatever size it is.
 
 Two things to know. With several accounts you'll see a brief focus flicker every few minutes, and if you happen to be typing at that exact moment the keystroke goes to Roblox instead of to you. And if Windows refuses to hand over focus, the keystroke is skipped and it tries again a minute later rather than fighting for it.
 

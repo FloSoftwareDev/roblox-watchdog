@@ -604,9 +604,23 @@ function Get-KeyNameFromCode($code)
     if ($named.ContainsKey([int]$code)) { return $named[[int]$code] }
     if (($code -ge 0x30 -and $code -le 0x39) -or ($code -ge 0x41 -and $code -le 0x5A))
     {
-        return [string][char][int]$code
+        return ([string][char][int]$code).ToLower()                               # lower case, like the modifier names and the step list
+
     }
     return $null
+}
+
+function Test-KeyDown($code)
+{
+    # Its own function so the picker can be driven in a test without a keyboard. The high
+    # bit means the key is down right now.
+    return ([Win32.Window]::GetAsyncKeyState($code) -lt 0)
+}
+
+function Get-AntiIdleModifiers
+{
+    # In the order they are written, so ctrl+alt+e always comes out the same way round
+    return [ordered]@{ ctrl = 0x11; alt = 0x12; shift = 0x10 }
 }
 
 function Get-AntiIdlePickableCodes
@@ -618,6 +632,91 @@ function Get-AntiIdlePickableCodes
     0x30..0x39 | ForEach-Object { $codes.Add($_) }
     0x41..0x5A | ForEach-Object { $codes.Add($_) }
     return $codes
+}
+
+function Get-CursorPoint
+{
+    # Wrapped so the picker can be driven in a test without a mouse
+    $point = New-Object POINT
+    if (-not [WinPos]::GetCursorPos([ref]$point)) { return $null }
+    return [pscustomobject]@{ X = $point.X; Y = $point.Y }
+}
+
+function Wait-NoKeyDown($seconds)
+{
+    # Whatever dismissed the dialog is probably still held: the OK click, or the Enter or
+    # Space that pressed its button. Capturing before that comes up reads the dismissal
+    # as the answer.
+    $watched = @(Get-AntiIdlePickableCodes) + @(0x01)
+    $deadline = (Get-Date).AddSeconds($seconds)
+    while ((Get-Date) -lt $deadline)
+    {
+        $anyDown = $false
+        foreach ($code in $watched)
+        {
+            if (Test-KeyDown $code) { $anyDown = $true; break }
+        }
+        if (-not $anyDown) { return $true }
+        Start-Sleep -Milliseconds 30
+    }
+    return $false
+}
+
+function Get-PickedAntiIdleInput($windowRect, $seconds)
+{
+    # Returns what to put in the box: a key, a combination, a click, or $null if it was
+    # cancelled or nothing happened in time.
+    #
+    # Modifiers on their own do not finish the pick, so holding ctrl and then tapping e
+    # gives ctrl+e. Letting a modifier go without pressing anything with it gives the
+    # modifier by itself, which is how shift alone can still be chosen.
+    $modifierTable = Get-AntiIdleModifiers
+    $modifierCodes = @($modifierTable.Values)
+    $baseCodes = @(Get-AntiIdlePickableCodes | Where-Object { $modifierCodes -notcontains $_ })
+    $lastHeldNames = @()
+
+    $deadline = (Get-Date).AddSeconds($seconds)
+    while ((Get-Date) -lt $deadline)
+    {
+        if (Test-KeyDown 0x1B) { return $null }                                       # VK_ESCAPE cancels
+
+        $heldNames = New-Object System.Collections.Generic.List[string]
+        foreach ($name in $modifierTable.Keys)
+        {
+            if (Test-KeyDown $modifierTable[$name]) { $heldNames.Add($name) }
+        }
+
+        foreach ($code in $baseCodes)
+        {
+            if (-not (Test-KeyDown $code)) { continue }
+            $name = Get-KeyNameFromCode $code
+            if (-not $name) { continue }
+            $pieces = @($heldNames) + @($name)
+            return ($pieces -join "+")
+        }
+
+        # A modifier that was held and then let go, with nothing pressed alongside it
+        if ($heldNames.Count -eq 0 -and $lastHeldNames.Count -eq 1)
+        {
+            return $lastHeldNames[0]
+        }
+        $lastHeldNames = @($heldNames)
+
+        if ($windowRect -and (Test-KeyDown 0x01))                                     # VK_LBUTTON
+        {
+            $point = Get-CursorPoint
+            if (-not $point) { return $null }
+            $fractionX = [math]::Round((($point.X - $windowRect.X) / $windowRect.Width), 4)
+            $fractionY = [math]::Round((($point.Y - $windowRect.Y) / $windowRect.Height), 4)
+            if ($fractionX -lt 0 -or $fractionX -gt 1 -or $fractionY -lt 0 -or $fractionY -gt 1)
+            {
+                return "outside"
+            }
+            return "click $fractionX,$fractionY"
+        }
+        Start-Sleep -Milliseconds 30
+    }
+    return $null
 }
 
 function Get-AntiIdleAction($setting)
@@ -647,10 +746,47 @@ function Get-AntiIdleAction($setting)
         throw "An anti-idle click is written as 'click 0.5,0.6': two numbers between 0 and 1, which are fractions of the window"
     }
 
+    # ctrl+e, alt+shift+w, and so on. Held while the key is tapped, then released, which
+    # is what a game sees as a real shortcut rather than two separate presses.
+    $modifierTable = Get-AntiIdleModifiers
+    $pieces = @($trimmed -split '\+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($pieces.Count -gt 1 -or ($trimmed -match '\+'))
+    {
+        if ($pieces.Count -lt 2)
+        {
+            throw "A combination needs a key after the modifier, like 'ctrl+e'"
+        }
+        $modifierCodes = New-Object System.Collections.Generic.List[byte]
+        $names = New-Object System.Collections.Generic.List[string]
+        for ($index = 0; $index -lt $pieces.Count - 1; $index++)
+        {
+            $name = $pieces[$index].ToLower()
+            if (-not $modifierTable.Contains($name))
+            {
+                throw "'$($pieces[$index])' is not a modifier. Only ctrl, alt and shift can be held, like 'ctrl+e'"
+            }
+            if ($modifierCodes -contains [byte]$modifierTable[$name])
+            {
+                throw "'$name' is held twice in '$trimmed'"
+            }
+            $modifierCodes.Add([byte]$modifierTable[$name])
+            $names.Add($name)
+        }
+        $baseName = $pieces[$pieces.Count - 1]
+        if ($modifierTable.Contains($baseName.ToLower()))
+        {
+            throw "'$trimmed' is only modifiers. One of them has to be a key, like 'ctrl+e'"
+        }
+        $baseCode = Get-StepKeyCode $baseName 0
+        $names.Add($baseName)
+        return [pscustomobject]@{ Kind = "key"; Key = [byte]$baseCode; Modifiers = $modifierCodes.ToArray()
+                                  Label = ($names -join "+") }
+    }
+
     # Get-StepKeyCode throws with the list of what it accepts, which is the message worth
     # showing here too, so it is left to do the talking
     $code = Get-StepKeyCode $trimmed 0
-    return [pscustomobject]@{ Kind = "key"; Key = [byte]$code; Label = $trimmed }
+    return [pscustomobject]@{ Kind = "key"; Key = [byte]$code; Modifiers = @(); Label = $trimmed }
 }
 
 function Get-StepList($stepText)
@@ -913,72 +1049,55 @@ function Show-SettingsWindow($saved)
     $antiIdlePickButton.Size = New-Object System.Drawing.Size(62, 23)
     Set-ThemedButton $antiIdlePickButton $false
     $antiIdlePickButton.Add_Click({
-        # Either a key or a spot, whichever happens first. Someone asked for this because
+        # Either a key, a combination, or a spot to click. Someone asked for this because
         # Space makes the character jump, and typing a key name by hand meant knowing
         # which names were accepted.
-        $robloxWindow = $null
-        foreach ($candidate in (Get-Process $processName -ErrorAction SilentlyContinue | Sort-Object StartTime))
+        #
+        # The button is disabled and focus moved off it for the duration. Space and Enter
+        # activate whichever button has focus, which is this one straight after it was
+        # clicked, so pressing Space both answered the question and clicked Pick again:
+        # it looked as though the pick had been ignored and was still waiting.
+        $antiIdlePickButton.Enabled = $false
+        $antiIdleBox.Focus() | Out-Null
+        try
         {
-            $candidate.Refresh()
-            if ($candidate.MainWindowHandle -ne [IntPtr]::Zero) { $robloxWindow = $candidate; break }
+            $robloxWindow = $null
+            foreach ($candidate in (Get-Process $processName -ErrorAction SilentlyContinue | Sort-Object StartTime))
+            {
+                $candidate.Refresh()
+                if ($candidate.MainWindowHandle -ne [IntPtr]::Zero) { $robloxWindow = $candidate; break }
+            }
+            $windowRect = if ($robloxWindow) { Get-WindowRectangle $robloxWindow.MainWindowHandle } else { $null }
+
+            $clickPart = if ($windowRect) { ", or click a spot inside the Roblox window" }
+                         else { ". Open a Roblox window first if you want to pick a spot to click instead" }
+            [System.Windows.Forms.MessageBox]::Show(
+                "Press the key you want to use$clickPart.`r`n`r`nHold ctrl, alt or shift with it for a " +
+                "combination. Escape cancels.",
+                "Pick a key or a spot", [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+
+            $null = Wait-NoKeyDown 3
+            $picked = Get-PickedAntiIdleInput $windowRect 30
+
+            if ($picked -eq "outside")
+            {
+                [System.Windows.Forms.MessageBox]::Show("That click was outside the Roblox window.",
+                    "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+            }
+            elseif ($picked)
+            {
+                $antiIdleBox.Text = $picked
+            }
+
+            # Let go of whatever was pressed before handing the keyboard back, or the key
+            # that was just chosen also lands on the settings window
+            $null = Wait-NoKeyDown 3
         }
-        $windowRect = if ($robloxWindow) { Get-WindowRectangle $robloxWindow.MainWindowHandle } else { $null }
-
-        $clickPart = if ($windowRect) { ", or click a spot inside the Roblox window" }
-                     else { ". Open a Roblox window first if you want to pick a spot to click instead" }
-        [System.Windows.Forms.MessageBox]::Show(
-            "Press the key you want to use$clickPart.`r`n`r`nPress Escape to cancel.",
-            "Pick a key or a spot", [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-
-        # Wait for the hand to come off whatever dismissed that dialog, or the OK click
-        # and the Enter key get picked up as the answer
-        $settle = (Get-Date).AddSeconds(3)
-        $codes = Get-AntiIdlePickableCodes
-        while ((Get-Date) -lt $settle)
+        finally
         {
-            $anythingDown = ([Win32.Window]::GetAsyncKeyState(0x01) -lt 0)
-            foreach ($code in $codes)
-            {
-                if ([Win32.Window]::GetAsyncKeyState($code) -lt 0) { $anythingDown = $true; break }
-            }
-            if (-not $anythingDown) { break }
-            Start-Sleep -Milliseconds 40
-        }
-
-        $deadline = (Get-Date).AddSeconds(30)
-        while ((Get-Date) -lt $deadline)
-        {
-            if ([Win32.Window]::GetAsyncKeyState(0x1B) -lt 0) { return }               # VK_ESCAPE cancels
-
-            foreach ($code in $codes)
-            {
-                if ([Win32.Window]::GetAsyncKeyState($code) -ge 0) { continue }
-                $name = Get-KeyNameFromCode $code
-                if (-not $name) { continue }
-                $antiIdleBox.Text = $name
-                while ([Win32.Window]::GetAsyncKeyState($code) -lt 0) { Start-Sleep -Milliseconds 40 }
-                return
-            }
-
-            if ($windowRect -and [Win32.Window]::GetAsyncKeyState(0x01) -lt 0)         # VK_LBUTTON
-            {
-                $point = New-Object POINT
-                if (-not [WinPos]::GetCursorPos([ref]$point)) { return }
-                $fractionX = [math]::Round((($point.X - $windowRect.X) / $windowRect.Width), 4)
-                $fractionY = [math]::Round((($point.Y - $windowRect.Y) / $windowRect.Height), 4)
-                if ($fractionX -lt 0 -or $fractionX -gt 1 -or $fractionY -lt 0 -or $fractionY -gt 1)
-                {
-                    [System.Windows.Forms.MessageBox]::Show("That click was outside the Roblox window.",
-                        "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
-                        [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
-                    return
-                }
-                $antiIdleBox.Text = "click $fractionX,$fractionY"
-                while ([Win32.Window]::GetAsyncKeyState(0x01) -lt 0) { Start-Sleep -Milliseconds 50 }
-                return
-            }
-            Start-Sleep -Milliseconds 40
+            $antiIdlePickButton.Enabled = $true
         }
     })
     $form.Controls.Add($antiIdlePickButton)
@@ -1948,12 +2067,28 @@ function Get-AntiIdleInterval
 
 }
 
-function Send-AntiIdleKey($code)
+function Send-AntiIdleKey($code, $modifiers)
 {
+    # Modifiers go down first and come up last, in reverse, so the game sees one
+    # shortcut instead of a handful of unrelated presses
+    $held = @($modifiers | Where-Object { $_ })
+    foreach ($modifier in $held)
+    {
+        $modifierScan = [byte]([Win32.Window]::MapVirtualKey($modifier, 0))
+        [Win32.Window]::keybd_event($modifier, $modifierScan, 0, [UIntPtr]::Zero)
+    }
+    if ($held.Count) { Start-Sleep -Milliseconds 30 }
+
     $scanCode = [byte]([Win32.Window]::MapVirtualKey($code, 0))                       # games want a real scan code
     [Win32.Window]::keybd_event($code, $scanCode, 0, [UIntPtr]::Zero)                 # key down
     Start-Sleep -Milliseconds 80
     [Win32.Window]::keybd_event($code, $scanCode, 2, [UIntPtr]::Zero)                 # KEYEVENTF_KEYUP
+
+    for ($index = $held.Count - 1; $index -ge 0; $index--)
+    {
+        $modifierScan = [byte]([Win32.Window]::MapVirtualKey($held[$index], 0))
+        [Win32.Window]::keybd_event($held[$index], $modifierScan, 2, [UIntPtr]::Zero)
+    }
 }
 
 function Send-AntiIdleClick($handle, $action)
@@ -1978,7 +2113,7 @@ function Send-AntiIdleAction($handle)
     # be read at all, so a broken field still keeps the clients awake.
     if (-not $antiIdleAction)
     {
-        Send-AntiIdleKey ([byte]0x20)
+        Send-AntiIdleKey ([byte]0x20) @()
         return "pressed Space"
     }
     if ($antiIdleAction.Kind -eq "click")
@@ -1986,7 +2121,7 @@ function Send-AntiIdleAction($handle)
         if (Send-AntiIdleClick $handle $antiIdleAction) { return "clicked $($antiIdleAction.X),$($antiIdleAction.Y)" }
         return $null
     }
-    Send-AntiIdleKey $antiIdleAction.Key
+    Send-AntiIdleKey $antiIdleAction.Key $antiIdleAction.Modifiers
     return "pressed $($antiIdleAction.Label)"
 }
 
