@@ -92,6 +92,8 @@
 #                                         vensters over te nemen in plaats van ze te sluiten en opnieuw te starten:
 #                                         de oudste wordt main en de rest alts op volgorde van starten, elk met het
 #                                         eigen logbestand dat via de starttijd van het proces wordt gevonden.
+#                                         Sluiten en overnemen zijn tegenpolen, dus in het instellingenvenster kan er
+#                                         maar een van de twee aan staan: de ander gaat uit zodra je er een aanzet.
 #
 #------------------------------------------------------------------------------------#
 
@@ -912,6 +914,26 @@ function Show-SettingsWindow($saved)
     $adoptOpenBox.FlatStyle = "Flat"
     $adoptOpenBox.ForeColor = $themeText
     $form.Controls.Add($adoptOpenBox)
+
+    # Closing the other windows and adopting them are opposites, so ticking one unticks
+    # the other. Better to make the contradiction impossible here than to pick a winner
+    # at startup and explain it in the log. Each handler only acts on its own box being
+    # ticked, which is what stops the pair setting each other off in a loop.
+    $closeOthersBox.Add_CheckedChanged({
+        if ($closeOthersBox.Checked) { $adoptOpenBox.Checked = $false }
+    })
+    $adoptOpenBox.Add_CheckedChanged({
+        if ($adoptOpenBox.Checked) { $closeOthersBox.Checked = $false }
+    })
+
+    # Those only fire on a change, so a settings file that already has both, from an
+    # older version or edited by hand, is sorted out here. Adopting wins, because closing
+    # the windows would destroy the very thing it was told to adopt.
+    if ($closeOthersBox.Checked -and $adoptOpenBox.Checked)
+    {
+        $closeOthersBox.Checked = $false
+    }
+
     $rowTop += 26
 
     $allMonitorsBox = New-Object System.Windows.Forms.CheckBox
@@ -2495,8 +2517,10 @@ if ($discordWebhookUrl)
 
 if ($closeOtherClients -and $adoptOpenClients)
 {
-    # Both on contradict each other, and adopting is the one that was asked for by
-    # ticking the newer box, so say which won rather than quietly closing the lot
+    # The settings window will not let both be ticked, but this is still reachable: a
+    # restart after a crash goes straight in without opening it, so a settings file that
+    # already had both, or was edited by hand, arrives here as it is. Adopting wins,
+    # because closing the windows would destroy the very thing it was told to adopt.
     Write-Log ("not closing the other Roblox windows: they are being adopted instead. Untick " +
                "'Adopt the windows already open' if you want them closed on start")
 }

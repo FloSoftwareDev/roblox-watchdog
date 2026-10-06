@@ -49,7 +49,7 @@ Each adopted window gets its own log, found by matching the log's creation time 
 
 What it cannot do is tell which alt each window is logged into, because nothing local says so. The names in the window are your account list's order, not necessarily what each one is really playing. For alts that makes no practical difference since they are treated the same, but main is the exception, which is why main still has to be the oldest.
 
-If "Close other Roblox windows on start" is also ticked, adopting wins and the log says so.
+This and "Close other Roblox windows on start" are opposites, so the settings window will not let you tick both: ticking one unticks the other. Neither on is fine and means it leaves whatever is open alone and launches your accounts anyway. If a settings file somehow has both, for instance one written by an older version, adopting wins and the log says so, because closing the windows would destroy the very thing it was told to adopt.
 
 the window
 
