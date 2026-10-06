@@ -127,7 +127,7 @@ $rejoinGraceSeconds = 30                                                        
 $migrationWitnesses = 2                                                              # accounts landing on the same new server before it counts as a move
 $relogWaveSize = 3                                                                   # accounts relogging together before it is worth saying so on its own
 $logLivenessSeconds = 120                                                            # a log written more recently than this belongs to a live client
-$watchdogVersion = "1.7.0"                                                           # the build stamps the exe with this too, and the exe wins at runtime
+$watchdogVersion = "1.7.1"                                                           # the build stamps the exe with this too, and the exe wins at runtime
 $releaseApiUrl = "https://api.github.com/repos/FloSoftwareDev/roblox-watchdog/releases/latest"
 $releasePageUrl = "https://github.com/FloSoftwareDev/roblox-watchdog/releases/latest"
 $versionCheckHours = 6                                                               # it runs for days at a time, so once at the start is not enough
@@ -905,7 +905,7 @@ function Show-SettingsWindow($saved)
     $rowTop += 26
 
     $adoptOpenBox = New-Object System.Windows.Forms.CheckBox
-    $adoptOpenBox.Text = "Adopt the Roblox windows already open, launch nothing"
+    $adoptOpenBox.Text = "Adopt the windows already open, launch nothing"
     $adoptOpenBox.Location = New-Object System.Drawing.Point(248, $rowTop)
     $adoptOpenBox.Size = New-Object System.Drawing.Size(320, 20)
     $adoptOpenBox.Checked = ($saved["AdoptOpenClients"] -eq "True")
@@ -2498,7 +2498,7 @@ if ($closeOtherClients -and $adoptOpenClients)
     # Both on contradict each other, and adopting is the one that was asked for by
     # ticking the newer box, so say which won rather than quietly closing the lot
     Write-Log ("not closing the other Roblox windows: they are being adopted instead. Untick " +
-               "'Adopt the Roblox windows already open' if you want them closed on start")
+               "'Adopt the windows already open' if you want them closed on start")
 }
 elseif ($closeOtherClients)
 {
