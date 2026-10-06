@@ -84,6 +84,14 @@
 #                                         zeven minuten op 05-10, en elke poging vraagt Roblox opnieuw. Nu wordt het
 #                                         venster met rust gelaten tot iemand de controle doet, met een melding erbij,
 #                                         en daarna gaat het account gewoon verder.
+# 013          06-10-2026 Miniwar AFK FG  Pauze stopte het herstarten maar niet het kijken: er werd nog gelezen, nog
+#                                         besloten dat een account van server was gewisseld, en nog een client
+#                                         gesloten om een disconnect die daarna niet herstart kon worden. Pauze doet
+#                                         nu niets meer, en bij hervatten wordt wat de logbestanden in de tussentijd
+#                                         kregen overgeslagen. Verder een instelling om de al openstaande Roblox
+#                                         vensters over te nemen in plaats van ze te sluiten en opnieuw te starten:
+#                                         de oudste wordt main en de rest alts op volgorde van starten, elk met het
+#                                         eigen logbestand dat via de starttijd van het proces wordt gevonden.
 #
 #------------------------------------------------------------------------------------#
 
@@ -119,7 +127,7 @@ $rejoinGraceSeconds = 30                                                        
 $migrationWitnesses = 2                                                              # accounts landing on the same new server before it counts as a move
 $relogWaveSize = 3                                                                   # accounts relogging together before it is worth saying so on its own
 $logLivenessSeconds = 120                                                            # a log written more recently than this belongs to a live client
-$watchdogVersion = "1.6.1"                                                           # the build stamps the exe with this too, and the exe wins at runtime
+$watchdogVersion = "1.7.0"                                                           # the build stamps the exe with this too, and the exe wins at runtime
 $releaseApiUrl = "https://api.github.com/repos/FloSoftwareDev/roblox-watchdog/releases/latest"
 $releasePageUrl = "https://github.com/FloSoftwareDev/roblox-watchdog/releases/latest"
 $versionCheckHours = 6                                                               # it runs for days at a time, so once at the start is not enough
@@ -670,6 +678,7 @@ function Get-DefaultSettings
         RelaunchDelaySeconds   = "90"
         MaximumSessionMinutes  = "45"
         CloseOtherClients      = "True"
+        AdoptOpenClients       = "False"
         FramerateCap           = "30"
         AntiIdleMinutes        = "15"
         AntiIdleKey            = "Space"
@@ -893,6 +902,16 @@ function Show-SettingsWindow($saved)
     $form.Controls.Add($closeOthersBox)
     $rowTop += 26
 
+    $adoptOpenBox = New-Object System.Windows.Forms.CheckBox
+    $adoptOpenBox.Text = "Adopt the Roblox windows already open, launch nothing"
+    $adoptOpenBox.Location = New-Object System.Drawing.Point(248, $rowTop)
+    $adoptOpenBox.Size = New-Object System.Drawing.Size(320, 20)
+    $adoptOpenBox.Checked = ($saved["AdoptOpenClients"] -eq "True")
+    $adoptOpenBox.FlatStyle = "Flat"
+    $adoptOpenBox.ForeColor = $themeText
+    $form.Controls.Add($adoptOpenBox)
+    $rowTop += 26
+
     $allMonitorsBox = New-Object System.Windows.Forms.CheckBox
     $allMonitorsBox.Text = "Spread the windows over all monitors"
     $allMonitorsBox.Location = New-Object System.Drawing.Point(248, $rowTop)
@@ -1049,6 +1068,7 @@ function Show-SettingsWindow($saved)
         $result[$key] = $inputs[$key].Text.Trim()
     }
     $result["CloseOtherClients"] = [string]$closeOthersBox.Checked
+    $result["AdoptOpenClients"] = [string]$adoptOpenBox.Checked
     $result["UseAllMonitors"] = [string]$allMonitorsBox.Checked
     $result["AggressiveAntiIdle"] = [string]$aggressiveIdleBox.Checked
     $result["RememberWindowPositions"] = [string]$rememberPositionsBox.Checked
@@ -1195,6 +1215,7 @@ $minimumFreeMegabytes = [int]$settings.MinimumFreeMegabytes
 $relaunchDelaySeconds = [int]$settings.RelaunchDelaySeconds
 $maximumSessionMinutes = [int]$settings.MaximumSessionMinutes
 $closeOtherClients = ($settings.CloseOtherClients -ne "False")
+$adoptOpenClients = ($settings.AdoptOpenClients -eq "True")
 $framerateCap = [int]$settings.FramerateCap
 $antiIdleMinutes = [int]$settings.AntiIdleMinutes
 $antiIdleKey = $settings.AntiIdleKey
@@ -2069,15 +2090,56 @@ function Test-IsStarterStub($path)
 
 function Find-StartupLogFile($process)
 {
-    # A client that was already running: its log was created within seconds of the process
+    # A client that was already running: its log is created a couple of seconds after the
+    # process. Measured over six live clients the gap was 1.96 to 2.13 seconds and every
+    # one matched a different log, so this is a sound way to tell them apart.
+    #
+    # Logs another session already holds are left out, or adopting several clients at once
+    # would hand the same log to more than one of them and have them read each other's
+    # disconnects.
+    $takenPaths = @($sessions.Values | ForEach-Object { $_.LogPath } | Where-Object { $_ })
     $logFile = Get-PlayerLogFiles |
+        Where-Object { $takenPaths -notcontains $_.FullName } |
         Sort-Object { [math]::Abs(($_.CreationTime - $process.StartTime).TotalSeconds) } |
         Select-Object -First 1
     if (-not $logFile -or [math]::Abs(($logFile.CreationTime - $process.StartTime).TotalSeconds) -gt 60)
     {
-        throw "No *_Player_*.log in $logFolder matches PID $($process.Id) started at $($process.StartTime)"
+        throw "No unclaimed *_Player_*.log in $logFolder matches PID $($process.Id) started at $($process.StartTime)"
     }
     return $logFile.FullName
+}
+
+function Register-AdoptedClient($accountName, $process, $describedAs)
+{
+    # Taking over a client that was already playing, rather than closing it and starting
+    # again. Used for main on every start, and for every open client when "adopt the
+    # Roblox windows already open" is on.
+    $session = $sessions[$accountName]
+    $session.ProcessId = $process.Id
+    $session.ProcessStartTime = $process.StartTime
+    $session.StartedAt = $process.StartTime
+    $session.LastInputAt = Get-Date                                                   # unknown when it last had input, so start the clock now
+    $session.JoinedAt = Get-Date                                                      # it was already playing, so don't hold it to the join timeout
+    $session.EverStarted = $true                                                      # it is already up, so a stop is a relaunch
+    $session.StepsPending = $false                                                    # already set up by whoever was playing it
+    Set-SessionState $session "Running"
+
+    try
+    {
+        $session.LogPath = Find-StartupLogFile $process
+        # Only what happens from now on: the log holds however long it has been running
+        $session.LogOffset = (Get-Item $session.LogPath).Length
+        Write-Log ("adopted PID $($process.Id) as $describedAs $accountName, " +
+                   "log $(Split-Path -Leaf $session.LogPath)")
+    }
+    catch
+    {
+        # Without a log we cannot see it disconnect, but it is still tracked and tiled
+        $session.LogPath = $null
+        Write-Log ("WARNING: adopted PID $($process.Id) as $describedAs $accountName but found no matching log, " +
+                   "so disconnects will not be seen for it until it relaunches")
+    }
+    Set-ClientWindow $accountName $process.Id | Out-Null
 }
 
 function Read-NewLogText($session)
@@ -2393,28 +2455,34 @@ else
     Write-Log "will not kill alts over memory (now $([int](Get-FreeMegabytes)) MB available)"
 }
 
-# A running client is adopted as main; everything else is untracked and closed
-$runningMain = Get-RobloxClients | Sort-Object StartTime | Select-Object -First 1
-if ($runningMain)
+# The oldest running client is adopted as main. With "adopt the Roblox windows already
+# open" the rest are taken as the alts instead of being closed and launched again, in the
+# order they started, so a farm that is already up is picked up as it stands.
+#
+# Which running client belongs to which alt cannot be known: nothing local says so. For
+# alts that does not matter, since they are interchangeable, but it does mean the names in
+# the window are the account list's order and not necessarily what each window is logged
+# into. Main is the exception and is the oldest, which is why it has to be started first.
+$runningClients = @(Get-RobloxClients | Sort-Object StartTime)
+if ($adoptOpenClients -and $runningClients.Count -gt 1)
 {
-    $sessions[$mainAccount].ProcessId = $runningMain.Id
-    $sessions[$mainAccount].ProcessStartTime = $runningMain.StartTime
-    $sessions[$mainAccount].StartedAt = $runningMain.StartTime
-    $sessions[$mainAccount].LastInputAt = Get-Date                                    # unknown when it last had input, so start the clock now
-    $sessions[$mainAccount].JoinedAt = Get-Date                                       # it was already playing, so don't hold it to the join timeout
-    $sessions[$mainAccount].EverStarted = $true                                       # it is already up, so a stop is a relaunch
-    Set-SessionState $sessions[$mainAccount] "Running"
-    try
+    $takeUpTo = [math]::Min($runningClients.Count, $allAccounts.Count)
+    Write-Log ("adopting the $takeUpTo client$(if ($takeUpTo -ne 1) { 's' }) already open instead of launching; " +
+               "the oldest is taken as main and the rest as alts in the order they started")
+    for ($adoptIndex = 0; $adoptIndex -lt $takeUpTo; $adoptIndex++)
     {
-        $sessions[$mainAccount].LogPath = Find-StartupLogFile $runningMain
-        Write-Log "adopted PID $($runningMain.Id) as main $mainAccount, log $(Split-Path -Leaf $sessions[$mainAccount].LogPath)"
+        $role = if ($adoptIndex -eq 0) { "main" } else { "an already open client for" }
+        Register-AdoptedClient $allAccounts[$adoptIndex] $runningClients[$adoptIndex] $role
     }
-    catch
+    if ($runningClients.Count -gt $allAccounts.Count)
     {
-        # Without a log we cannot see main disconnect, but it is still tracked and tiled
-        Write-Log "WARNING: adopted PID $($runningMain.Id) as main $mainAccount but found no matching log, disconnect detection stays off for main until it relaunches"
+        Write-Log ("$($runningClients.Count - $allAccounts.Count) open client$(if ($runningClients.Count - $allAccounts.Count -ne 1) { 's' }) " +
+                   "left over with no account to match, so they are not tracked")
     }
-    Set-ClientWindow $mainAccount $runningMain.Id | Out-Null                          # main is always slot 0
+}
+elseif ($runningClients.Count)
+{
+    Register-AdoptedClient $mainAccount $runningClients[0] "main"
 }
 Write-Log "alts: $($altAccounts -join ', ')"
 if ($discordWebhookUrl)
@@ -2423,10 +2491,18 @@ if ($discordWebhookUrl)
     Send-DiscordAlert "Watchdog started" ("Watching $($allAccounts.Count) accounts: " + ($allAccounts -join ", ")) $alertGreen
 }
 
-if ($closeOtherClients)
+if ($closeOtherClients -and $adoptOpenClients)
 {
+    # Both on contradict each other, and adopting is the one that was asked for by
+    # ticking the newer box, so say which won rather than quietly closing the lot
+    Write-Log ("not closing the other Roblox windows: they are being adopted instead. Untick " +
+               "'Adopt the Roblox windows already open' if you want them closed on start")
+}
+elseif ($closeOtherClients)
+{
+    $claimedIds = @($sessions.Values | ForEach-Object { $_.ProcessId } | Where-Object { $_ -ne 0 })
     Get-Process $processName -ErrorAction SilentlyContinue |
-        Where-Object { $_.Id -ne $sessions[$mainAccount].ProcessId -and $_.MainWindowHandle -ne 0 } |
+        Where-Object { $claimedIds -notcontains $_.Id -and $_.MainWindowHandle -ne 0 } |
         ForEach-Object {
             Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
             Write-Log "closed leftover PID $($_.Id)"
@@ -2689,7 +2765,28 @@ $pauseButton.Add_Click({
     else
     {
         $pauseButton.Text = "Pause"
-        Write-Log "resumed from the window"
+
+        # Nothing was read while paused, so the logs have a pause worth of history in
+        # them. Skipping to the end means resuming does not act on a disconnect that has
+        # already come and gone, or relog an account that came back half an hour ago.
+        $skipped = 0
+        foreach ($pausedName in $allAccounts)
+        {
+            $pausedSession = $sessions[$pausedName]
+            if (-not $pausedSession.LogPath) { continue }
+            try
+            {
+                $length = (Get-Item $pausedSession.LogPath -ErrorAction Stop).Length
+                if ($length -gt $pausedSession.LogOffset)
+                {
+                    $pausedSession.LogOffset = $length
+                    $skipped++
+                }
+            }
+            catch { }
+        }
+        Write-Log ("resumed from the window" +
+                   $(if ($skipped) { ", skipping what $skipped log$(if ($skipped -ne 1) { 's' }) gained while paused" } else { "" }))
     }
 })
 
@@ -2809,6 +2906,7 @@ $settingsButton.Add_Click({
     $script:antiIdleVirtualKey = if ($updated.AntiIdleKey -eq "Space") { [byte]0x20 } else { [byte][char]([string]$updated.AntiIdleKey).ToUpper() }
     $script:reapStrayMinutes = [int]$updated.ReapStrayMinutes
     $script:closeOtherClients = ($updated.CloseOtherClients -ne "False")
+    $script:adoptOpenClients = ($updated.AdoptOpenClients -eq "True")
     $script:useAllMonitors = ($updated.UseAllMonitors -ne "False")
     $script:discordWebhookUrl = $updated.DiscordWebhookUrl
     $script:discordPingId = $updated.DiscordPingId
@@ -3130,6 +3228,13 @@ function Invoke-SlowChecks
     {
         $session = $sessions[$accountName]
         if ($session.Paused) { continue }
+
+        # Paused used to stop the relaunching but not the watching, so it still read the
+        # logs, still decided an account had changed server, and still closed a client
+        # over a disconnect it could then not relaunch. Pause means leave everything
+        # alone, so nothing in here runs at all.
+        if ($script:globalPaused) { continue }
+
         try
         {
             if ($session.State -eq "Idle")

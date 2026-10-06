@@ -41,6 +41,16 @@ heads up: by default it closes any other Roblox windows besides your main when i
 
 also: it works out which client is your main by taking the oldest one that's already running. If you start it with an alt open and your main closed, that alt gets treated as main, which means it never gets relogged and never gets closed to free memory. There is no way to ask a running client which account it is, so if that matters, close everything before starting.
 
+starting with everything already open
+
+Tick "Adopt the Roblox windows already open, launch nothing" and it takes over what is running instead of closing it and starting again. The oldest window becomes main and the rest become your alts in the order they started, each one tiled and watched from that moment on. Anything you have configured that has no window left gets launched as usual, so six accounts with four open means four adopted and two launched.
+
+Each adopted window gets its own log, found by matching the log's creation time against when the process started: measured over six live clients that gap was 1.96 to 2.13 seconds and every client matched a different log. That matters because a window without a log is one the watchdog cannot see disconnect.
+
+What it cannot do is tell which alt each window is logged into, because nothing local says so. The names in the window are your account list's order, not necessarily what each one is really playing. For alts that makes no practical difference since they are treated the same, but main is the exception, which is why main still has to be the oldest.
+
+If "Close other Roblox windows on start" is also ticked, adopting wins and the log says so.
+
 the window
 
 A strip along the top says whether it's running as administrator, because that one thing silently breaks tiling, anti-idle and stray cleanup.
@@ -49,7 +59,7 @@ The same strip tells you when a newer version is out, and clicking it opens the 
 
 Under that: how many accounts are playing, free memory, strays closed, how long the watchdog has been up, and how long since the last disconnect. Then a row per account with a coloured dot, what it's doing, its memory, how long it's been up, and how many times it has dropped. The drop count goes amber at five, which is how you spot one account that's having a worse time than the others. Select a row and the line underneath shows its total uptime and when it last dropped, and why.
 
-Select one or several accounts and you can relaunch or pause just those. Pause on its own stops relaunching, anti-idle and stray cleanup without closing anything, for when you want to work or record.
+Select one or several accounts and you can relaunch or pause just those. Pause on its own stops everything without closing anything, for when you want to work or record: no relaunching, no anti-idle, no stray cleanup, and no watching either. It used to keep reading the logs while paused, which meant it could still decide an account had changed server and still close a client over a disconnect it was not allowed to relaunch. Resuming picks up from the end of each log, so it does not act on a disconnect that has already come and gone.
 
 Closing the window keeps the watchdog running in the tray. Use Exit, or the tray menu, to actually stop it.
 
