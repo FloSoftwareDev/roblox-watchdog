@@ -108,6 +108,11 @@
 #                                         Ook opgelost: de muisbeweging in de agressieve stand las Left en Top van een
 #                                         rechthoek die X en Y heet, dus de cursor werd sinds 1.6.0 naar 0,0 gezet in
 #                                         plaats van naar het midden van het venster.
+# 016          06-10-2026 Miniwar AFK FG  Space koos in de picker niets: Space en Enter activeren de knop die focus
+#                                         heeft, en dat was de Pick knop zelf, dus de vraag werd geantwoord en de
+#                                         knop opnieuw ingedrukt. Knop staat nu uit tijdens het kiezen. Verder kan
+#                                         er nu ctrl, alt of shift bij gehouden worden, en bij het starten gaat er
+#                                         geen Discord bericht meer uit tenzij het na een crash zelf terugkwam.
 #
 #------------------------------------------------------------------------------------#
 
@@ -143,7 +148,7 @@ $rejoinGraceSeconds = 30                                                        
 $migrationWitnesses = 2                                                              # accounts landing on the same new server before it counts as a move
 $relogWaveSize = 3                                                                   # accounts relogging together before it is worth saying so on its own
 $logLivenessSeconds = 120                                                            # a log written more recently than this belongs to a live client
-$watchdogVersion = "1.9.0"                                                           # the build stamps the exe with this too, and the exe wins at runtime
+$watchdogVersion = "1.9.1"                                                           # the build stamps the exe with this too, and the exe wins at runtime
 $releaseApiUrl = "https://api.github.com/repos/FloSoftwareDev/roblox-watchdog/releases/latest"
 $releasePageUrl = "https://github.com/FloSoftwareDev/roblox-watchdog/releases/latest"
 $versionCheckHours = 6                                                               # it runs for days at a time, so once at the start is not enough
