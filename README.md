@@ -67,7 +67,7 @@ discord alerts
 
 Paste a webhook url into the settings and hit Test, which sends a message straight away so you know it works before you rely on it.
 
-It only sends things worth looking at: it started, it crashed and whether it's coming back, an account has failed five launches in a row, memory ran out with nothing left to close, it's missing permissions, and several accounts dropping at once. Ordinary single disconnects are not sent, because there were 152 of them in four days and that would be noise rather than a notification.
+It only sends things worth looking at: it crashed and whether it's coming back, it came back by itself after crashing, an account has failed five launches in a row, memory ran out with nothing left to close, it's missing permissions, and several accounts dropping at once. Starting it yourself sends nothing, because you are standing right there having just pressed Start. Ordinary single disconnects are not sent, because there were 152 of them in four days and that would be noise rather than a notification.
 
 Relogs are sent for main, and for any group of three or more at once, because the character and inventory come back reset and that is work you have to redo. A single alt relogging only goes in the log. If you have a step list the message says whether it ran itself or is waiting for you to press Run.
 

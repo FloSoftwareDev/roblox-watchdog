@@ -2806,7 +2806,15 @@ Write-Log "alts: $($altAccounts -join ', ')"
 if ($discordWebhookUrl)
 {
     Write-Log "Discord alerts are on$(if ($discordSummaryMinutes -gt 0) { ", with a status message every $discordSummaryMinutes min" })"
-    Send-DiscordAlert "Watchdog started" ("Watching $($allAccounts.Count) accounts: " + ($allAccounts -join ", ")) $alertGreen
+
+    # Starting it yourself is not news: you are sitting right there having just pressed
+    # Start. Coming back by itself after a crash is news, because the crash message only
+    # promised it would try, and this is what says it worked.
+    if ($autoStarted)
+    {
+        Send-DiscordAlert "Watchdog is back up" ("It restarted itself after crashing and is watching " +
+            "$($allAccounts.Count) accounts again: " + ($allAccounts -join ", ")) $alertGreen
+    }
 }
 
 if ($closeOtherClients -and $adoptOpenClients)
