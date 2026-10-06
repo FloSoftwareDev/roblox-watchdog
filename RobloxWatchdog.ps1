@@ -765,7 +765,9 @@ function Show-SettingsWindow($saved)
 {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Roblox Watchdog"
-    $form.Size = New-Object System.Drawing.Size(600, 800)
+    # Tall enough for everything on it: the rows reach about y=900, and at 800 the
+    # Start button sat below the edge and had to be scrolled to
+    $form.Size = New-Object System.Drawing.Size(600, 940)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
