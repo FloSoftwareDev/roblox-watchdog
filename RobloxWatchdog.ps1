@@ -116,6 +116,13 @@
 # 017          06-10-2026 Miniwar AFK FG  Agressieve anti-idle negeert nu de ingestelde toets of plek en loopt en
 #                                         springt in plaats daarvan. Een personage dat beweegt en springt is
 #                                         moeilijker te verwarren met iemand die stilzit dan een losse toets.
+# 018          07-10-2026 Miniwar AFK FG  Meerdere servers. Elke server heeft zijn eigen link, place, accounts,
+#                                         stappenlijst, relogtijd, anti-idle en limieten; main is per server en op de
+#                                         extra servers optioneel. Het instellingenvenster is opnieuw opgezet met
+#                                         tabbladen (Servers, Account Manager, Windows, Alerts, Housekeeping) in
+#                                         plaats van een lange kolom. Een server kan er tijdens het draaien bij, met
+#                                         de knop Add server: lopende accounts houden hun sessie en venster, nieuwe
+#                                         komen er achteraan bij en starten op hun beurt.
 #
 #------------------------------------------------------------------------------------#
 
@@ -1063,93 +1070,127 @@ function Save-Settings($settings)
     }
 }
 
-function Show-SettingsWindow($saved)
+function Add-ThemedTab($tabs, $caption)
 {
+    # One page of the settings window. Its own panel so the rows inside can be laid out
+    # from the top left without minding what page it is on.
+    $page = New-Object System.Windows.Forms.TabPage
+    $page.Text = $caption
+    $page.BackColor = $themeBackground
+    $page.ForeColor = $themeText
+    $page.Padding = New-Object System.Windows.Forms.Padding(10)
+    $tabs.TabPages.Add($page)
+    return $page
+}
+
+function Add-FieldRow($page, $inputs, $labelText, $key, $value, $top, $height, $maskInput)
+{
+    # A caption on the left, a box on the right. Returns the top for the next row, so a
+    # page is written as a list of these rather than arithmetic at every line.
+    $label = New-Object System.Windows.Forms.Label
+    $label.Text = $labelText
+    $label.Location = New-Object System.Drawing.Point(4, ($top + 3))
+    $label.Size = New-Object System.Drawing.Size(210, 20)
+    $label.ForeColor = $themeText
+    $page.Controls.Add($label)
+
+    $box = New-Object System.Windows.Forms.TextBox
+    $box.Location = New-Object System.Drawing.Point(220, $top)
+    $box.Size = New-Object System.Drawing.Size(300, $height)
+    $box.Text = "$value"
+    $box.BackColor = $themeSurface
+    $box.ForeColor = $themeText
+    $box.BorderStyle = "FixedSingle"
+    if ($height -gt 24)
+    {
+        $box.Multiline = $true
+        $box.AcceptsReturn = $true
+        $box.ScrollBars = "Vertical"
+    }
+    if ($maskInput) { $box.UseSystemPasswordChar = $true }
+    $page.Controls.Add($box)
+    $inputs[$key] = $box
+    return ($top + $height + 10)
+}
+
+function Add-CheckRow($page, $inputs, $labelText, $key, $checked, $top)
+{
+    $box = New-Object System.Windows.Forms.CheckBox
+    $box.Text = $labelText
+    $box.Location = New-Object System.Drawing.Point(220, $top)
+    $box.Size = New-Object System.Drawing.Size(312, 20)                             # fits the longest label, which is the aggressive one at 307 px
+
+    $box.Checked = $checked
+    $box.FlatStyle = "Flat"
+    $box.ForeColor = $themeText
+    $page.Controls.Add($box)
+    $inputs[$key] = $box
+    return ($top + 26)
+}
+
+function Get-ServerSummary($server, $index)
+{
+    # What the list on the Servers tab shows for one server
+    $accounts = @(Get-ServerAccounts $server)
+    $main = "$($server.MainAccount)".Trim()
+    $name = if ("$($server.Name)".Trim()) { "$($server.Name)" } else { "Server $($index + 1)" }
+    $who = if ($main) { "main $main" } else { "no main" }
+    return "$name  -  place $($server.PlaceId)  -  $($accounts.Count) account$(if ($accounts.Count -ne 1) { 's' }), $who"
+}
+
+function Show-ServerWindow($server, $index, $isFirst)
+{
+    # One server's own settings, in the same shape as the rest of the window. Returns the
+    # edited copy, or $null if it was cancelled, so the caller can leave the list alone.
+    $working = @{}
+    foreach ($key in $server.Keys) { $working[$key] = $server[$key] }
+
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Roblox Watchdog"
-    # Tall enough for everything on it: the rows reach about y=900, and at 800 the
-    # Start button sat below the edge and had to be scrolled to
-    $form.Size = New-Object System.Drawing.Size(600, 940)
-    $form.StartPosition = "CenterScreen"
-    $form.FormBorderStyle = "FixedDialog"
+    $form.Text = "Server settings"
+    $form.Size = New-Object System.Drawing.Size(580, 680)
+    $form.StartPosition = "CenterParent"
+    $form.FormBorderStyle = "FixedSingle"
     $form.MaximizeBox = $false
-    # Scrolls rather than growing taller with every setting added, so it still fits on a
-    # 1080p screen and there is room for more rows later
-    $form.AutoScroll = $true
+    $form.MinimizeBox = $false
     Set-ThemedForm $form
 
     $inputs = @{}
-    $rowTop = 15
+    $top = 14
+    $top = Add-FieldRow $form $inputs "Name for this server" "Name" $working.Name $top 20 $false
+    $top = Add-FieldRow $form $inputs "Place ID" "PlaceId" $working.PlaceId $top 20 $false
+    $top = Add-FieldRow $form $inputs "Private server link" "PrivateServerLink" $working.PrivateServerLink $top 20 $false
 
-    # $maskInput only decides whether the box shows dots instead of characters; it is
-    # not a password itself. Named that way because an $isPassword parameter trips
-    # PSScriptAnalyzer's PSAvoidUsingPlainTextForPassword rule on the name alone.
-    function Add-Row($labelText, $key, $height, $maskInput)
+    $mainCaption = if ($isFirst) { "Main username" } else { "Main username (optional)" }
+    $top = Add-FieldRow $form $inputs $mainCaption "MainAccount" $working.MainAccount $top 20 $false
+    if (-not $isFirst)
     {
-        $label = New-Object System.Windows.Forms.Label
-        $label.Text = $labelText
-        $label.Location = New-Object System.Drawing.Point(15, $rowTop)
-        # Generous width: the longest label needs ~160px at 100% scaling, and a label
-        # that runs out of room wraps and gets clipped by its own height
-        $label.Size = New-Object System.Drawing.Size(225, 20)
-        # centred against the field, and top-aligned next to a multiline box
-        $label.TextAlign = if ($height -gt 20) { "TopLeft" } else { "MiddleLeft" }
-        $label.ForeColor = $themeMuted
-        $form.Controls.Add($label)
+        $mainNote = New-Object System.Windows.Forms.Label
+        $mainNote.Text = "Leave blank and every account here is treated as an alt."
+        $mainNote.Location = New-Object System.Drawing.Point(220, ($top - 6))
+        $mainNote.Size = New-Object System.Drawing.Size(312, 30)                      # two lines of room: the text needs 304 px and 300 was not enough
+        $mainNote.ForeColor = $themeMuted
+        $form.Controls.Add($mainNote)
+        $top += 22
 
-        $textBox = New-Object System.Windows.Forms.TextBox
-        $textBox.Location = New-Object System.Drawing.Point(248, $rowTop)
-        $textBox.Size = New-Object System.Drawing.Size(320, $height)
-        Set-ThemedInput $textBox
-        $textBox.Text = $saved[$key]
-        if ($height -gt 20)
-        {
-            $textBox.Multiline = $true
-            $textBox.AcceptsReturn = $true
-            $textBox.ScrollBars = "Vertical"
-        }
-        if ($maskInput)
-        {
-            $textBox.UseSystemPasswordChar = $true
-        }
-        $form.Controls.Add($textBox)
-
-        $inputs[$key] = $textBox
-        Set-Variable -Name rowTop -Value ($rowTop + $height + 10) -Scope 1
     }
 
-    Add-Row "Main username" "MainAccount" 20 $false
-    Add-Row "Alt usernames (one per line)" "AltAccounts" 100 $false
-    Add-Row "Place ID" "PlaceId" 20 $false
-    Add-Row "Private server link (optional)" "PrivateServerLink" 20 $false
-    Add-Row "RAM web server port" "AccountManagerPort" 20 $false
-    Add-Row "RAM web server password" "AccountManagerPassword" 20 $true
-    Add-Row "Kill an alt below free MB (0=off)" "MinimumFreeMegabytes" 20 $false
-    Add-Row "Seconds between launches" "RelaunchDelaySeconds" 20 $false
-    Add-Row "Relog alts after minutes" "MaximumSessionMinutes" 20 $false
-    Add-Row "Frame rate cap (0=off)" "FramerateCap" 20 $false
-    Add-Row "Anti-idle every min (0=off)" "AntiIdleMinutes" 20 $false
-    Add-Row "Anti-idle key or spot" "AntiIdleKey" 20 $false
+    $top = Add-FieldRow $form $inputs "Alt usernames (one per line)" "AltAccounts" $working.AltAccounts $top 90 $false
+    $top = Add-FieldRow $form $inputs "Relog alts after minutes" "MaximumSessionMinutes" $working.MaximumSessionMinutes $top 20 $false
+    $top = Add-FieldRow $form $inputs "Frame rate cap (0=off)" "FramerateCap" $working.FramerateCap $top 20 $false
+    $top = Add-FieldRow $form $inputs "Kill an alt below free MB (0=off)" "MinimumFreeMegabytes" $working.MinimumFreeMegabytes $top 20 $false
+    $top = Add-FieldRow $form $inputs "Anti-idle every min (0=off)" "AntiIdleMinutes" $working.AntiIdleMinutes $top 20 $false
 
-    # Narrowed to leave room for the picker, the same way the step list does it
+    # the key field is narrowed to leave room for its picker
+    $top = Add-FieldRow $form $inputs "Anti-idle key or spot" "AntiIdleKey" $working.AntiIdleKey $top 20 $false
     $antiIdleBox = $inputs["AntiIdleKey"]
-    $antiIdleBox.Size = New-Object System.Drawing.Size(252, 20)
-
-    $antiIdlePickButton = New-Object System.Windows.Forms.Button
-    $antiIdlePickButton.Text = "Pick"
-    $antiIdlePickButton.Location = New-Object System.Drawing.Point(506, ($antiIdleBox.Location.Y - 1))
-    $antiIdlePickButton.Size = New-Object System.Drawing.Size(62, 23)
-    Set-ThemedButton $antiIdlePickButton $false
-    $antiIdlePickButton.Add_Click({
-        # Either a key, a combination, or a spot to click. Someone asked for this because
-        # Space makes the character jump, and typing a key name by hand meant knowing
-        # which names were accepted.
-        #
-        # The button is disabled and focus moved off it for the duration. Space and Enter
-        # activate whichever button has focus, which is this one straight after it was
-        # clicked, so pressing Space both answered the question and clicked Pick again:
-        # it looked as though the pick had been ignored and was still waiting.
-        $antiIdlePickButton.Enabled = $false
+    $antiIdleBox.Size = New-Object System.Drawing.Size(232, 20)
+    $pickKeyButton = New-Object System.Windows.Forms.Button
+    $pickKeyButton.Text = "Pick"
+    $pickKeyButton.Location = New-Object System.Drawing.Point(458, ($antiIdleBox.Location.Y - 1))
+    $pickKeyButton.Size = New-Object System.Drawing.Size(62, 23)
+    Set-ThemedButton $pickKeyButton $false
+    $pickKeyButton.Add_Click({
+        $pickKeyButton.Enabled = $false
         $antiIdleBox.Focus() | Out-Null
         try
         {
@@ -1160,7 +1201,6 @@ function Show-SettingsWindow($saved)
                 if ($candidate.MainWindowHandle -ne [IntPtr]::Zero) { $robloxWindow = $candidate; break }
             }
             $windowRect = if ($robloxWindow) { Get-WindowRectangle $robloxWindow.MainWindowHandle } else { $null }
-
             $clickPart = if ($windowRect) { ", or click a spot inside the Roblox window" }
                          else { ". Open a Roblox window first if you want to pick a spot to click instead" }
             [System.Windows.Forms.MessageBox]::Show(
@@ -1168,201 +1208,58 @@ function Show-SettingsWindow($saved)
                 "combination. Escape cancels.",
                 "Pick a key or a spot", [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-
             $null = Wait-NoKeyDown 3
             $picked = Get-PickedAntiIdleInput $windowRect 30
-
             if ($picked -eq "outside")
             {
                 [System.Windows.Forms.MessageBox]::Show("That click was outside the Roblox window.",
                     "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
                     [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
             }
-            elseif ($picked)
-            {
-                $antiIdleBox.Text = $picked
-            }
-
-            # Let go of whatever was pressed before handing the keyboard back, or the key
-            # that was just chosen also lands on the settings window
+            elseif ($picked) { $antiIdleBox.Text = $picked }
             $null = Wait-NoKeyDown 3
         }
-        finally
-        {
-            $antiIdlePickButton.Enabled = $true
-        }
+        finally { $pickKeyButton.Enabled = $true }
     })
-    $form.Controls.Add($antiIdlePickButton)
-    Add-Row "Close strays after min (0=off)" "ReapStrayMinutes" 20 $false
-    Add-Row "Discord alerts every min (0=off)" "DiscordSummaryMinutes" 20 $false
-    Add-Row "Discord id to ping for main" "DiscordPingId" 20 $false
+    $form.Controls.Add($pickKeyButton)
 
-    # Its own row rather than Add-Row, to leave space for the Test button beside it
-    $webhookLabel = New-Object System.Windows.Forms.Label
-    $webhookLabel.Text = "Discord webhook (optional)"
-    $webhookLabel.Location = New-Object System.Drawing.Point(15, $rowTop)
-    $webhookLabel.Size = New-Object System.Drawing.Size(225, 20)
-    $webhookLabel.TextAlign = "MiddleLeft"
-    $webhookLabel.ForeColor = $themeMuted
-    $form.Controls.Add($webhookLabel)
+    $top = Add-CheckRow $form $inputs "Aggressive anti-idle: walk and jump, ignores the key" "AggressiveAntiIdle" ("$($working.AggressiveAntiIdle)" -eq "True") $top
 
-    $webhookBox = New-Object System.Windows.Forms.TextBox
-    $webhookBox.Location = New-Object System.Drawing.Point(248, $rowTop)
-    $webhookBox.Size = New-Object System.Drawing.Size(252, 20)
-    $webhookBox.Text = $saved["DiscordWebhookUrl"]
-    Set-ThemedInput $webhookBox
-    $form.Controls.Add($webhookBox)
-    $inputs["DiscordWebhookUrl"] = $webhookBox
-
-    $testButton = New-Object System.Windows.Forms.Button
-    $testButton.Text = "Test"
-    $testButton.Location = New-Object System.Drawing.Point(506, ($rowTop - 1))
-    $testButton.Size = New-Object System.Drawing.Size(62, 23)
-    Set-ThemedButton $testButton $false
-    $testButton.Add_Click({
-        # Sent straight away rather than through the queue, so the result can be shown
-        $url = $webhookBox.Text.Trim()
-        if ($url -notmatch '^https://(discord\.com|discordapp\.com)/api/webhooks/\d+/[\w-]+$')
-        {
-            [System.Windows.Forms.MessageBox]::Show("That does not look like a Discord webhook url.",
-                "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
-                [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
-            return
-        }
-        try
-        {
-            $body = @{ embeds = @(@{ title = "Test message"
-                                     description = "The webhook works. Alerts will arrive here."
-                                     color = $alertGreen }) } | ConvertTo-Json -Depth 5 -Compress
-            $content = New-Object System.Net.Http.StringContent($body, [System.Text.Encoding]::UTF8, "application/json")
-            $response = $httpClient.PostAsync($url, $content).GetAwaiter().GetResult()
-            if ($response.IsSuccessStatusCode)
-            {
-                [System.Windows.Forms.MessageBox]::Show("Sent. Check the channel.", "Roblox Watchdog",
-                    [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-            }
-            else
-            {
-                [System.Windows.Forms.MessageBox]::Show("Discord replied $([int]$response.StatusCode) '$($response.ReasonPhrase)'.",
-                    "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
-                    [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
-            }
-        }
-        catch
-        {
-            [System.Windows.Forms.MessageBox]::Show("Could not reach Discord: $($_.Exception.GetBaseException().Message)",
-                "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
-                [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
-        }
-    })
-    $form.Controls.Add($testButton)
-    $rowTop += 30
-
-    # Closing other clients is destructive, so it is a deliberate choice
-    $closeOthersBox = New-Object System.Windows.Forms.CheckBox
-    $closeOthersBox.Text = "Close other Roblox windows on start"
-    $closeOthersBox.Location = New-Object System.Drawing.Point(248, $rowTop)
-    $closeOthersBox.Size = New-Object System.Drawing.Size(320, 20)
-    $closeOthersBox.Checked = ($saved["CloseOtherClients"] -ne "False")
-    $closeOthersBox.FlatStyle = "Flat"                                                # so the box itself follows the dark background
-    $closeOthersBox.ForeColor = $themeText
-    $form.Controls.Add($closeOthersBox)
-    $rowTop += 26
-
-    $adoptOpenBox = New-Object System.Windows.Forms.CheckBox
-    $adoptOpenBox.Text = "Adopt the windows already open, launch nothing"
-    $adoptOpenBox.Location = New-Object System.Drawing.Point(248, $rowTop)
-    $adoptOpenBox.Size = New-Object System.Drawing.Size(320, 20)
-    $adoptOpenBox.Checked = ($saved["AdoptOpenClients"] -eq "True")
-    $adoptOpenBox.FlatStyle = "Flat"
-    $adoptOpenBox.ForeColor = $themeText
-    $form.Controls.Add($adoptOpenBox)
-
-    # Closing the other windows and adopting them are opposites, so ticking one unticks
-    # the other. Better to make the contradiction impossible here than to pick a winner
-    # at startup and explain it in the log. Each handler only acts on its own box being
-    # ticked, which is what stops the pair setting each other off in a loop.
-    $closeOthersBox.Add_CheckedChanged({
-        if ($closeOthersBox.Checked) { $adoptOpenBox.Checked = $false }
-    })
-    $adoptOpenBox.Add_CheckedChanged({
-        if ($adoptOpenBox.Checked) { $closeOthersBox.Checked = $false }
-    })
-
-    # Those only fire on a change, so a settings file that already has both, from an
-    # older version or edited by hand, is sorted out here. Adopting wins, because closing
-    # the windows would destroy the very thing it was told to adopt.
-    if ($closeOthersBox.Checked -and $adoptOpenBox.Checked)
-    {
-        $closeOthersBox.Checked = $false
-    }
-
-    $rowTop += 26
-
-    $allMonitorsBox = New-Object System.Windows.Forms.CheckBox
-    $allMonitorsBox.Text = "Spread the windows over all monitors"
-    $allMonitorsBox.Location = New-Object System.Drawing.Point(248, $rowTop)
-    $allMonitorsBox.Size = New-Object System.Drawing.Size(320, 20)
-    $allMonitorsBox.Checked = ($saved["UseAllMonitors"] -ne "False")
-    $allMonitorsBox.FlatStyle = "Flat"
-    $allMonitorsBox.ForeColor = $themeText
-    $form.Controls.Add($allMonitorsBox)
-    $rowTop += 26
-
-    $aggressiveIdleBox = New-Object System.Windows.Forms.CheckBox
-    $aggressiveIdleBox.Text = "Aggressive anti-idle: walk and jump, ignores the key"
-    $aggressiveIdleBox.Location = New-Object System.Drawing.Point(248, $rowTop)
-    $aggressiveIdleBox.Size = New-Object System.Drawing.Size(320, 20)
-    $aggressiveIdleBox.Checked = ($saved["AggressiveAntiIdle"] -eq "True")
-    $aggressiveIdleBox.FlatStyle = "Flat"
-    $aggressiveIdleBox.ForeColor = $themeText
-    $form.Controls.Add($aggressiveIdleBox)
-    $rowTop += 26
-
-    $rememberPositionsBox = New-Object System.Windows.Forms.CheckBox
-    $rememberPositionsBox.Text = "Put windows back where I dragged them"
-    $rememberPositionsBox.Location = New-Object System.Drawing.Point(248, $rowTop)
-    $rememberPositionsBox.Size = New-Object System.Drawing.Size(320, 20)
-    $rememberPositionsBox.Checked = ($saved["RememberWindowPositions"] -ne "False")
-    $rememberPositionsBox.FlatStyle = "Flat"
-    $rememberPositionsBox.ForeColor = $themeText
-    $form.Controls.Add($rememberPositionsBox)
-    $rowTop += 30
-
-    # Step list: its own multiline box with a Pick button, since a coordinate you have
-    # to type is both miserable and wrong the moment a window moves
+    # the step list, with the spot picker it already had
+    $top += 4
     $stepsLabel = New-Object System.Windows.Forms.Label
     $stepsLabel.Text = "Steps to run on main"
-    $stepsLabel.Location = New-Object System.Drawing.Point(15, $rowTop)
-    $stepsLabel.Size = New-Object System.Drawing.Size(225, 20)
-    $stepsLabel.ForeColor = $themeMuted
+    $stepsLabel.Location = New-Object System.Drawing.Point(4, ($top + 3))
+    $stepsLabel.Size = New-Object System.Drawing.Size(210, 20)
+    $stepsLabel.ForeColor = $themeText
     $form.Controls.Add($stepsLabel)
 
     $stepsHint = New-Object System.Windows.Forms.Label
     $stepsHint.Text = "key 2   hold w 4200" + [char]0x2003 + "scroll -6" + [char]0x2003 + "click 0.5,0.6   wait 7000"
-    $stepsHint.Location = New-Object System.Drawing.Point(15, ($rowTop + 20))
-    $stepsHint.Size = New-Object System.Drawing.Size(225, 34)
+    $stepsHint.Location = New-Object System.Drawing.Point(4, ($top + 24))
+    $stepsHint.Size = New-Object System.Drawing.Size(210, 46)
     $stepsHint.ForeColor = $themeMuted
     $form.Controls.Add($stepsHint)
 
     $stepsBox = New-Object System.Windows.Forms.TextBox
-    $stepsBox.Location = New-Object System.Drawing.Point(248, $rowTop)
-    $stepsBox.Size = New-Object System.Drawing.Size(252, 90)
+    $stepsBox.Location = New-Object System.Drawing.Point(220, $top)
+    $stepsBox.Size = New-Object System.Drawing.Size(232, 90)
     $stepsBox.Multiline = $true
     $stepsBox.AcceptsReturn = $true
     $stepsBox.ScrollBars = "Vertical"
-    $stepsBox.Font = New-Object System.Drawing.Font("Consolas", 9)
-    $stepsBox.Text = $saved["StepList"]
-    Set-ThemedInput $stepsBox
+    $stepsBox.Text = "$($working.StepList)"
+    $stepsBox.BackColor = $themeSurface
+    $stepsBox.ForeColor = $themeText
+    $stepsBox.BorderStyle = "FixedSingle"
     $form.Controls.Add($stepsBox)
     $inputs["StepList"] = $stepsBox
 
-    $pickButton = New-Object System.Windows.Forms.Button
-    $pickButton.Text = "Pick"
-    $pickButton.Location = New-Object System.Drawing.Point(506, ($rowTop - 1))
-    $pickButton.Size = New-Object System.Drawing.Size(62, 23)
-    Set-ThemedButton $pickButton $false
-    $pickButton.Add_Click({
+    $pickSpotButton = New-Object System.Windows.Forms.Button
+    $pickSpotButton.Text = "Pick"
+    $pickSpotButton.Location = New-Object System.Drawing.Point(458, ($top - 1))
+    $pickSpotButton.Size = New-Object System.Drawing.Size(62, 23)
+    Set-ThemedButton $pickSpotButton $false
+    $pickSpotButton.Add_Click({
         $mainProcess = $null
         foreach ($candidate in (Get-Process $processName -ErrorAction SilentlyContinue | Sort-Object StartTime))
         {
@@ -1378,71 +1275,301 @@ function Show-SettingsWindow($saved)
         }
         $windowRect = Get-WindowRectangle $mainProcess.MainWindowHandle
         if (-not $windowRect) { return }
-
         [System.Windows.Forms.MessageBox]::Show(
             "Click the spot you want, inside the Roblox window.`r`n`r`nPress Escape to cancel.",
             "Pick a spot", [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-
-        # Polled rather than hooked: a global mouse hook in a WinForms app this size is
-        # far more trouble than reading the button state a few times a second
-        $deadline = (Get-Date).AddSeconds(30)
-        while ((Get-Date) -lt $deadline)
+        $null = Wait-NoKeyDown 3
+        $picked = Get-PickedAntiIdleInput $windowRect 30
+        if ($picked -eq "outside")
         {
-            if ([Win32.Window]::GetAsyncKeyState(0x1B) -ne 0) { return }               # VK_ESCAPE
-            if ([Win32.Window]::GetAsyncKeyState(0x01) -lt 0)                          # VK_LBUTTON, high bit = down
+            [System.Windows.Forms.MessageBox]::Show("That click was outside the Roblox window.",
+                "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+            return
+        }
+        if (-not $picked -or $picked -notlike "click *") { return }                     # a key is no use as a step spot
+        if ($stepsBox.Text -and -not $stepsBox.Text.EndsWith("`n")) { $stepsBox.AppendText("`r`n") }
+        $stepsBox.AppendText($picked)
+    })
+    $form.Controls.Add($pickSpotButton)
+    $top += 100
+
+    $top = Add-CheckRow $form $inputs "Run the steps by itself when main rejoins" "RunStepsOnRejoin" ("$($working.RunStepsOnRejoin)" -eq "True") $top
+
+    $okButton = New-Object System.Windows.Forms.Button
+    $okButton.Text = "OK"
+    $okButton.Location = New-Object System.Drawing.Point(350, ($top + 10))
+    $okButton.Size = New-Object System.Drawing.Size(80, 28)
+    $okButton.DialogResult = "OK"
+    Set-ThemedButton $okButton $true
+    $form.Controls.Add($okButton)
+    $form.AcceptButton = $okButton
+
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = "Cancel"
+    $cancelButton.Location = New-Object System.Drawing.Point(440, ($top + 10))
+    $cancelButton.Size = New-Object System.Drawing.Size(80, 28)
+    $cancelButton.DialogResult = "Cancel"
+    Set-ThemedButton $cancelButton $false
+    $form.Controls.Add($cancelButton)
+    $form.CancelButton = $cancelButton
+
+    if ($form.ShowDialog() -ne "OK") { $form.Dispose(); return $null }
+
+    foreach ($key in $inputs.Keys)
+    {
+        $control = $inputs[$key]
+        if ($control -is [System.Windows.Forms.CheckBox]) { $working[$key] = [string]$control.Checked }
+        else { $working[$key] = $control.Text.Trim() }
+    }
+    if (-not $working.Name) { $working.Name = "Server $($index + 1)" }
+    $form.Dispose()
+    return $working
+}
+
+function Show-SettingsWindow($saved)
+{
+    # Five pages instead of one long column. The old window had sixteen text rows, six
+    # tickboxes and the step list stacked down a single page, which ran past the bottom
+    # of a 800 pixel form and had no room left for a second server.
+    $servers = New-Object System.Collections.Generic.List[object]
+    foreach ($server in @($saved.Servers)) { $servers.Add((ConvertTo-ServerRecord ([pscustomobject]$server))) }
+    if (-not $servers.Count) { $servers.Add((Get-DefaultServer)) }
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Roblox Watchdog"
+    $form.Size = New-Object System.Drawing.Size(580, 520)
+    $form.StartPosition = "CenterScreen"
+    $form.FormBorderStyle = "FixedSingle"
+    $form.MaximizeBox = $false
+    Set-ThemedForm $form
+
+    $tabs = New-Object System.Windows.Forms.TabControl
+    $tabs.Location = New-Object System.Drawing.Point(10, 10)
+    $tabs.Size = New-Object System.Drawing.Size(546, 410)
+    $tabs.Appearance = "Normal"
+    $form.Controls.Add($tabs)
+
+    $inputs = @{}
+
+    # ---- Servers ---------------------------------------------------------------
+    $serversPage = Add-ThemedTab $tabs "Servers"
+
+    $serverList = New-Object System.Windows.Forms.ListBox
+    $serverList.Location = New-Object System.Drawing.Point(4, 8)
+    $serverList.Size = New-Object System.Drawing.Size(516, 290)
+    $serverList.BackColor = $themeSurface
+    $serverList.ForeColor = $themeText
+    $serverList.BorderStyle = "FixedSingle"
+    $serversPage.Controls.Add($serverList)
+
+    $refreshServers = {
+        $keep = $serverList.SelectedIndex
+        $serverList.Items.Clear()
+        for ($i = 0; $i -lt $servers.Count; $i++) { $null = $serverList.Items.Add((Get-ServerSummary $servers[$i] $i)) }
+        if ($keep -ge 0 -and $keep -lt $serverList.Items.Count) { $serverList.SelectedIndex = $keep }
+        elseif ($serverList.Items.Count) { $serverList.SelectedIndex = 0 }
+    }
+    & $refreshServers
+
+    $addServerButton = New-Object System.Windows.Forms.Button
+    $addServerButton.Text = "Add server"
+    $addServerButton.Location = New-Object System.Drawing.Point(4, 306)
+    $addServerButton.Size = New-Object System.Drawing.Size(110, 27)
+    Set-ThemedButton $addServerButton $false
+    $serversPage.Controls.Add($addServerButton)
+
+    $editServerButton = New-Object System.Windows.Forms.Button
+    $editServerButton.Text = "Edit"
+    $editServerButton.Location = New-Object System.Drawing.Point(120, 306)
+    $editServerButton.Size = New-Object System.Drawing.Size(90, 27)
+    Set-ThemedButton $editServerButton $false
+    $serversPage.Controls.Add($editServerButton)
+
+    $removeServerButton = New-Object System.Windows.Forms.Button
+    $removeServerButton.Text = "Remove"
+    $removeServerButton.Location = New-Object System.Drawing.Point(216, 306)
+    $removeServerButton.Size = New-Object System.Drawing.Size(90, 27)
+    Set-ThemedButton $removeServerButton $false
+    $serversPage.Controls.Add($removeServerButton)
+
+    $serversNote = New-Object System.Windows.Forms.Label
+    $serversNote.Text = "Each server has its own link, accounts, step list, relog timer, anti-idle and limits."
+    $serversNote.Location = New-Object System.Drawing.Point(4, 340)
+    $serversNote.Size = New-Object System.Drawing.Size(516, 32)
+    $serversNote.ForeColor = $themeMuted
+    $serversPage.Controls.Add($serversNote)
+
+    $addServerButton.Add_Click({
+        $fresh = Get-DefaultServer
+        $fresh.Name = "Server $($servers.Count + 1)"
+        # a new server starts from the first one's limits, since those are usually the
+        # same machine and the same taste, and only the link and accounts really differ
+        if ($servers.Count)
+        {
+            foreach ($key in "MaximumSessionMinutes", "AntiIdleMinutes", "AntiIdleKey", "AggressiveAntiIdle", "FramerateCap")
             {
-                $point = New-Object POINT
-                if (-not [WinPos]::GetCursorPos([ref]$point)) { return }
-                $fractionX = [math]::Round((($point.X - $windowRect.X) / $windowRect.Width), 4)
-                $fractionY = [math]::Round((($point.Y - $windowRect.Y) / $windowRect.Height), 4)
-                if ($fractionX -lt 0 -or $fractionX -gt 1 -or $fractionY -lt 0 -or $fractionY -gt 1)
-                {
-                    [System.Windows.Forms.MessageBox]::Show("That click was outside the Roblox window.",
-                        "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
-                        [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
-                    return
-                }
-                $newLine = "click $fractionX,$fractionY"
-                if ($stepsBox.Text -and -not $stepsBox.Text.EndsWith("`n")) { $stepsBox.AppendText("`r`n") }
-                $stepsBox.AppendText($newLine)
-                while ([Win32.Window]::GetAsyncKeyState(0x01) -lt 0) { Start-Sleep -Milliseconds 50 }
-                return
+                $fresh[$key] = $servers[0][$key]
             }
-            Start-Sleep -Milliseconds 40
+            $fresh.PlaceId = $servers[0].PlaceId
+        }
+        $edited = Show-ServerWindow $fresh $servers.Count $false
+        if ($edited) { $servers.Add($edited); & $refreshServers; $serverList.SelectedIndex = $servers.Count - 1 }
+    })
+
+    $editServerButton.Add_Click({
+        $index = $serverList.SelectedIndex
+        if ($index -lt 0 -or $index -ge $servers.Count) { return }
+        $edited = Show-ServerWindow $servers[$index] $index ($index -eq 0)
+        if ($edited) { $servers[$index] = $edited; & $refreshServers }
+    })
+
+    $serverList.Add_DoubleClick({ $editServerButton.PerformClick() })
+
+    $removeServerButton.Add_Click({
+        $index = $serverList.SelectedIndex
+        if ($index -lt 0 -or $index -ge $servers.Count) { return }
+        if ($servers.Count -le 1)
+        {
+            [System.Windows.Forms.MessageBox]::Show("There has to be at least one server.",
+                "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+            return
+        }
+        $servers.RemoveAt($index)
+        & $refreshServers
+    })
+
+    # ---- Account Manager -------------------------------------------------------
+    $ramPage = Add-ThemedTab $tabs "Account Manager"
+    $top = 14
+    $top = Add-FieldRow $ramPage $inputs "RAM web server port" "AccountManagerPort" $saved.AccountManagerPort $top 20 $false
+    $top = Add-FieldRow $ramPage $inputs "RAM web server password" "AccountManagerPassword" $saved.AccountManagerPassword $top 20 $true
+    $top = Add-FieldRow $ramPage $inputs "Seconds between launches" "RelaunchDelaySeconds" $saved.RelaunchDelaySeconds $top 20 $false
+
+    $ramNote = New-Object System.Windows.Forms.Label
+    $ramNote.Text = ("In Account Manager: Settings > Developer, turn on Enable Web Server and Allow " +
+                     "LaunchAccount Method, and set the Webserver Password there. That password, not an " +
+                     "account password.")
+    $ramNote.Location = New-Object System.Drawing.Point(4, ($top + 10))
+    $ramNote.Size = New-Object System.Drawing.Size(516, 60)
+    $ramNote.ForeColor = $themeMuted
+    $ramPage.Controls.Add($ramNote)
+
+    # ---- Windows ---------------------------------------------------------------
+    $windowsPage = Add-ThemedTab $tabs "Windows"
+    $top = 14
+    $top = Add-CheckRow $windowsPage $inputs "Close other Roblox windows on start" "CloseOtherClients" ($saved["CloseOtherClients"] -ne "False") $top
+    $top = Add-CheckRow $windowsPage $inputs "Adopt the windows already open, launch nothing" "AdoptOpenClients" ($saved["AdoptOpenClients"] -eq "True") $top
+    $top = Add-CheckRow $windowsPage $inputs "Spread the windows over all monitors" "UseAllMonitors" ($saved["UseAllMonitors"] -ne "False") $top
+    $top = Add-CheckRow $windowsPage $inputs "Put windows back where I dragged them" "RememberWindowPositions" ($saved["RememberWindowPositions"] -ne "False") $top
+
+    $closeBox = $inputs["CloseOtherClients"]
+    $adoptBox = $inputs["AdoptOpenClients"]
+    $closeBox.Add_CheckedChanged({ if ($closeBox.Checked) { $adoptBox.Checked = $false } })
+    $adoptBox.Add_CheckedChanged({ if ($adoptBox.Checked) { $closeBox.Checked = $false } })
+    if ($closeBox.Checked -and $adoptBox.Checked) { $closeBox.Checked = $false }
+
+    $windowsNote = New-Object System.Windows.Forms.Label
+    $windowsNote.Text = ("Closing the open windows and adopting them are opposites, so only one of those " +
+                         "two can be on. Save layout and Load layout are in the watchdog window itself.")
+    $windowsNote.Location = New-Object System.Drawing.Point(4, ($top + 10))
+    $windowsNote.Size = New-Object System.Drawing.Size(516, 48)
+    $windowsNote.ForeColor = $themeMuted
+    $windowsPage.Controls.Add($windowsNote)
+
+    # ---- Alerts ----------------------------------------------------------------
+    $alertsPage = Add-ThemedTab $tabs "Alerts"
+    $top = 14
+    $top = Add-FieldRow $alertsPage $inputs "Discord webhook (optional)" "DiscordWebhookUrl" $saved.DiscordWebhookUrl $top 20 $false
+    $webhookBox = $inputs["DiscordWebhookUrl"]
+    $webhookBox.Size = New-Object System.Drawing.Size(232, 20)
+
+    $testButton = New-Object System.Windows.Forms.Button
+    $testButton.Text = "Test"
+    $testButton.Location = New-Object System.Drawing.Point(458, ($webhookBox.Location.Y - 1))
+    $testButton.Size = New-Object System.Drawing.Size(62, 23)
+    Set-ThemedButton $testButton $false
+    $testButton.Add_Click({
+        $url = $webhookBox.Text.Trim()
+        if (-not $url)
+        {
+            [System.Windows.Forms.MessageBox]::Show("Paste a webhook url first.", "Roblox Watchdog",
+                [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+            return
+        }
+        try
+        {
+            $payload = @{ content = "Roblox Watchdog test: this webhook works." } | ConvertTo-Json -Compress
+            $content = New-Object System.Net.Http.StringContent($payload, [System.Text.Encoding]::UTF8, "application/json")
+            $response = $httpClient.PostAsync($url, $content).Result
+            if ($response.IsSuccessStatusCode)
+            {
+                [System.Windows.Forms.MessageBox]::Show("Sent. Check the channel.", "Roblox Watchdog",
+                    [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+            }
+            else
+            {
+                [System.Windows.Forms.MessageBox]::Show("Discord said $([int]$response.StatusCode) '$($response.ReasonPhrase)'.",
+                    "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+            }
+        }
+        catch
+        {
+            [System.Windows.Forms.MessageBox]::Show("That did not work: $($_.Exception.GetBaseException().Message)",
+                "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
         }
     })
-    $form.Controls.Add($pickButton)
-    $rowTop += 100
+    $alertsPage.Controls.Add($testButton)
 
-    $runOnRejoinBox = New-Object System.Windows.Forms.CheckBox
-    $runOnRejoinBox.Text = "Run the steps by itself when main rejoins"
-    $runOnRejoinBox.Location = New-Object System.Drawing.Point(248, $rowTop)
-    $runOnRejoinBox.Size = New-Object System.Drawing.Size(320, 20)
-    $runOnRejoinBox.Checked = ($saved["RunStepsOnRejoin"] -eq "True")
-    $runOnRejoinBox.FlatStyle = "Flat"
-    $runOnRejoinBox.ForeColor = $themeText
-    $form.Controls.Add($runOnRejoinBox)
-    $rowTop += 30
+    $top = Add-FieldRow $alertsPage $inputs "Discord id to ping for main" "DiscordPingId" $saved.DiscordPingId $top 20 $false
+    $top = Add-FieldRow $alertsPage $inputs "Discord alerts every min (0=off)" "DiscordSummaryMinutes" $saved.DiscordSummaryMinutes $top 20 $false
 
-    $note = New-Object System.Windows.Forms.Label
-    $note.Text = "A running client is adopted as main; otherwise main is launched."
-    $note.Location = New-Object System.Drawing.Point(15, $rowTop)
-    $note.Size = New-Object System.Drawing.Size(553, 20)
-    $note.ForeColor = $themeMuted
-    $form.Controls.Add($note)
+    $alertsNote = New-Object System.Windows.Forms.Label
+    $alertsNote.Text = ("Only things worth looking at are sent: a crash and whether it is coming back, an " +
+                        "account that will not start, no memory left, missing permissions, a main relogging, " +
+                        "and several accounts dropping at once. Starting it yourself sends nothing.")
+    $alertsNote.Location = New-Object System.Drawing.Point(4, ($top + 10))
+    $alertsNote.Size = New-Object System.Drawing.Size(516, 64)
+    $alertsNote.ForeColor = $themeMuted
+    $alertsPage.Controls.Add($alertsNote)
 
+    # ---- Housekeeping ----------------------------------------------------------
+    $housePage = Add-ThemedTab $tabs "Housekeeping"
+    $top = 14
+    $top = Add-FieldRow $housePage $inputs "Close strays after min (0=off)" "ReapStrayMinutes" $saved.ReapStrayMinutes $top 20 $false
+
+    $houseNote = New-Object System.Windows.Forms.Label
+    $houseNote.Text = ("Roblox leaves helper processes behind when a client closes. They have no window, " +
+                       "sit on about 175 MB each and never exit, so they are closed once they are older " +
+                       "than this. A client that does have a window is never touched.")
+    $houseNote.Location = New-Object System.Drawing.Point(4, ($top + 10))
+    $houseNote.Size = New-Object System.Drawing.Size(516, 64)
+    $houseNote.ForeColor = $themeMuted
+    $housePage.Controls.Add($houseNote)
+
+    # ---- Start and cancel, outside the pages -----------------------------------
     $startButton = New-Object System.Windows.Forms.Button
     $startButton.Text = "Start"
-    $startButton.Location = New-Object System.Drawing.Point(468, ($rowTop + 30))
+    $startButton.Location = New-Object System.Drawing.Point(456, 432)
     $startButton.Size = New-Object System.Drawing.Size(100, 30)
     $startButton.DialogResult = "OK"
     Set-ThemedButton $startButton $true
     $form.Controls.Add($startButton)
     $form.AcceptButton = $startButton
 
-    # $null rather than exiting, so the status window can reopen this dialog later
-    # and a cancel just means "never mind" instead of closing the whole app
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = "Cancel"
+    $cancelButton.Location = New-Object System.Drawing.Point(348, 432)
+    $cancelButton.Size = New-Object System.Drawing.Size(100, 30)
+    $cancelButton.DialogResult = "Cancel"
+    Set-ThemedButton $cancelButton $false
+    $form.Controls.Add($cancelButton)
+    $form.CancelButton = $cancelButton
+
     if ($form.ShowDialog() -ne "OK")
     {
         $form.Dispose()
@@ -1452,115 +1579,133 @@ function Show-SettingsWindow($saved)
     $result = @{}
     foreach ($key in $inputs.Keys)
     {
-        $result[$key] = $inputs[$key].Text.Trim()
+        $control = $inputs[$key]
+        if ($control -is [System.Windows.Forms.CheckBox]) { $result[$key] = [string]$control.Checked }
+        else { $result[$key] = $control.Text.Trim() }
     }
-    $result["CloseOtherClients"] = [string]$closeOthersBox.Checked
-    $result["AdoptOpenClients"] = [string]$adoptOpenBox.Checked
-    $result["UseAllMonitors"] = [string]$allMonitorsBox.Checked
-    $result["AggressiveAntiIdle"] = [string]$aggressiveIdleBox.Checked
-    $result["RememberWindowPositions"] = [string]$rememberPositionsBox.Checked
-    $result["RunStepsOnRejoin"] = [string]$runOnRejoinBox.Checked
+    # ToArray, not @(): in PowerShell 5.1 @() leaves a List as a List, and assigning one
+    # into a hashtable index throws "Argument types do not match". This crashed the
+    # settings window on Start.
+    $result["Servers"] = $servers.ToArray()
+
+    $form.Dispose()
     return $result
+}
+
+function Test-ServerSettings($server, $label, $mainRequired)
+{
+    # One server's own settings. The first server has to have a main, because it is the
+    # one whose oldest window is adopted on startup and the one the step list belongs to
+    # by default. The extras do not: a server can be nothing but alts.
+    if ($mainRequired -and -not "$($server.MainAccount)".Trim())
+    {
+        throw "$label : a main username is required on the first server"
+    }
+    $accounts = @(Get-ServerAccounts $server)
+    if (-not $accounts.Count) { throw "$label : it has no accounts at all" }
+
+    $alts = @("$($server.AltAccounts)" -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ("$($server.MainAccount)".Trim() -and $alts -contains "$($server.MainAccount)".Trim())
+    {
+        throw "$label : $($server.MainAccount) is both the main and an alt"
+    }
+    $duplicateAlt = @($alts | Group-Object | Where-Object { $_.Count -gt 1 } | Select-Object -First 1)
+    if ($duplicateAlt.Count) { throw "$label : $($duplicateAlt[0].Name) is listed twice" }
+
+    if ("$($server.PlaceId)" -notmatch '^\d{1,19}$') { throw "$label : place ID must be a number" }
+
+    if ($server.PrivateServerLink)
+    {
+        $shareLink = $server.PrivateServerLink -match '^https://(www\.)?roblox\.com/share\?.*\bcode=[A-Za-z0-9_-]+' -and
+                     $server.PrivateServerLink -match 'type=Server'
+        $classicLink = $server.PrivateServerLink -match '^https://(www\.)?roblox\.com/games/\d+.*[?&]privateServerLinkCode=[A-Za-z0-9_-]+'
+        if (-not ($shareLink -or $classicLink))
+        {
+            throw ("$label : that does not look like a private server link. Paste the whole link from Roblox, " +
+                   "either a share link with type=Server or a game link with privateServerLinkCode")
+        }
+    }
+
+    # 0 turns it off: on a machine that sits at full memory, closing an alt is worse than
+    # leaving it running
+    if ("$($server.MinimumFreeMegabytes)" -notmatch '^\d{1,6}$') { throw "$label : free MB must be a number (0 to turn it off)" }
+    $freeMegabytes = [int]$server.MinimumFreeMegabytes
+    if ($freeMegabytes -ne 0 -and $freeMegabytes -lt 200) { throw "$label : free MB must be 0, or at least 200" }
+
+    if ("$($server.MaximumSessionMinutes)" -notmatch '^\d{1,5}$') { throw "$label : relog alts after minutes must be a number" }
+    if ([int]$server.MaximumSessionMinutes -lt 5) { throw "$label : relog alts after minutes must be at least 5" }
+
+    # 0 leaves Roblox's own setting alone; otherwise keep it in a sane range
+    if ("$($server.FramerateCap)" -notmatch '^\d{1,3}$') { throw "$label : frame rate cap must be a number (0 to leave it alone)" }
+    $cap = [int]$server.FramerateCap
+    if ($cap -ne 0 -and ($cap -lt 15 -or $cap -gt 360)) { throw "$label : frame rate cap must be 0, or between 15 and 360" }
+
+    # Roblox kicks at 20 minutes idle, so the interval has to leave room to get there
+    if ("$($server.AntiIdleMinutes)" -notmatch '^\d{1,2}$') { throw "$label : anti-idle minutes must be a number (0 to turn it off)" }
+    $idle = [int]$server.AntiIdleMinutes
+    if ($idle -ne 0 -and ($idle -lt 1 -or $idle -gt 18))
+    {
+        throw "$label : anti-idle minutes must be 0, or between 1 and 18 (Roblox kicks at 20)"
+    }
+    if ($idle -gt 0)
+    {
+        try { $null = Get-AntiIdleAction $server.AntiIdleKey }
+        catch { throw "$label : anti-idle - $($_.Exception.Message -replace '^line 0 : ', '')" }
+    }
+
+    if ($server.StepList)
+    {
+        try { Get-StepList $server.StepList | Out-Null }
+        catch { throw "$label : step list - $($_.Exception.Message)" }
+    }
 }
 
 function Test-Settings($settings)
 {
-    if (-not $settings.MainAccount) { throw "Main username is required" }
-    if (-not $settings.AltAccounts) { throw "At least one alt username is required" }
-    if (($settings.AltAccounts -split "`r?`n" | ForEach-Object { $_.Trim() }) -contains $settings.MainAccount)
-    {
-        throw "Main username must not also be in the alt list"
-    }
-    if ($settings.PlaceId -notmatch '^\d{1,19}$') { throw "Place ID must be a number" }
-    if ($settings.AccountManagerPort -notmatch '^\d{1,5}$') { throw "Port must be a number" }
-    if ([int]$settings.AccountManagerPort -lt 1 -or [int]$settings.AccountManagerPort -gt 65535)
-    {
-        throw "Port must be between 1 and 65535"
-    }
-    if ($settings.AccountManagerPassword.Length -lt 6) { throw "RAM password must match the Webserver Password in RAM (RAM requires 6+ characters for LaunchAccount)" }
+    # The settings that belong to the machine rather than to any one server
+    if ($settings.AccountManagerPort -notmatch '^\d{1,5}$') { throw "RAM web server port must be a number" }
+    $port = [int]$settings.AccountManagerPort
+    if ($port -lt 1 -or $port -gt 65535) { throw "RAM web server port must be between 1 and 65535" }
 
-    # The link is handed straight to RAM, which turns it into a private game join. Any
-    # other Roblox url used to be accepted here, and a plain game link looks close enough
-    # to paste by mistake: it then joins with no permission and the client shows error
-    # 524, over and over, which is a miserable thing to debug from the other end.
-    if ($settings.PrivateServerLink)
-    {
-        $shareLink = $settings.PrivateServerLink -match '^https://(www\.)?roblox\.com/share\?.*\bcode=[A-Za-z0-9_-]+' -and
-                     $settings.PrivateServerLink -match 'type=Server'
-        $classicLink = $settings.PrivateServerLink -match '^https://(www\.)?roblox\.com/games/\d+.*[?&]privateServerLinkCode=[A-Za-z0-9_-]+'
-        if (-not ($shareLink -or $classicLink))
-        {
-            throw ("Private server link must be a private server link, not an ordinary game link.`r`n`r`n" +
-                   "Either of these is fine:`r`n" +
-                   "  https://www.roblox.com/share?code=...&type=Server`r`n" +
-                   "  https://www.roblox.com/games/<id>/...?privateServerLinkCode=...`r`n`r`n" +
-                   "In Roblox, open the private server and use its invite link. Leave this empty to join a public server.")
-        }
-    }
+    # RAM refuses LaunchAccount without one, so an empty password means nothing launches
+    if (-not $settings.AccountManagerPassword) { throw "RAM web server password is required" }
+    if ($settings.AccountManagerPassword.Length -lt 6) { throw "RAM web server password must be at least 6 characters" }
 
-    foreach ($key in "MinimumFreeMegabytes", "RelaunchDelaySeconds", "MaximumSessionMinutes")
-    {
-        if ($settings[$key] -notmatch '^\d{1,9}$') { throw "$key must be a number" }
-    }
-    # 0 turns it off, for machines that sit at full memory all the time where closing an
-    # alt every ten seconds is worse than letting it run
-    $freeMegabytesSetting = [int]$settings.MinimumFreeMegabytes
-    if ($freeMegabytesSetting -ne 0 -and $freeMegabytesSetting -lt 100)
-    {
-        throw "Kill an alt below free MB must be 0, or at least 100"
-    }
-    if ([int]$settings.RelaunchDelaySeconds -lt 5)   { throw "Seconds between launches must be at least 5" }
-    if ([int]$settings.MaximumSessionMinutes -lt 5)  { throw "Relog alts after minutes must be at least 5" }
-
-    # 0 leaves Roblox's own setting alone; otherwise keep it in a sane range
-    if ($settings.FramerateCap -notmatch '^\d{1,3}$') { throw "Frame rate cap must be a number (0 to leave it alone)" }
-    $cap = [int]$settings.FramerateCap
-    if ($cap -ne 0 -and ($cap -lt 15 -or $cap -gt 360)) { throw "Frame rate cap must be 0, or between 15 and 360" }
-
-    # Roblox kicks at 20 minutes idle, so the interval has to leave room to get there
-    if ($settings.AntiIdleMinutes -notmatch '^\d{1,2}$') { throw "Anti-idle minutes must be a number (0 to turn it off)" }
-    $idle = [int]$settings.AntiIdleMinutes
-    if ($idle -ne 0 -and ($idle -lt 1 -or $idle -gt 18)) { throw "Anti-idle minutes must be 0, or between 1 and 18 (Roblox kicks at 20)" }
-    if ($idle -gt 0)
-    {
-        # Only when it is on: with anti-idle off the field is allowed to be anything,
-        # including empty
-        try { $null = Get-AntiIdleAction $settings.AntiIdleKey }
-        catch { throw "Anti-idle: $($_.Exception.Message -replace '^line 0 : ', '')" }
-    }
+    if ($settings.RelaunchDelaySeconds -notmatch '^\d{1,4}$') { throw "Seconds between launches must be a number" }
+    if ([int]$settings.RelaunchDelaySeconds -lt 5) { throw "Seconds between launches must be at least 5" }
 
     # Grace period before an untracked windowless client counts as a stray. Must be
     # longer than a launch takes, or a client still starting up would be killed
     if ($settings.ReapStrayMinutes -notmatch '^\d{1,3}$') { throw "Close strays after minutes must be a number (0 to turn it off)" }
     $reap = [int]$settings.ReapStrayMinutes
-    if ($reap -ne 0 -and ($reap -lt 2 -or $reap -gt 120)) { throw "Close strays after minutes must be 0, or between 2 and 120" }
+    if ($reap -ne 0 -and $reap -lt 2) { throw "Close strays after minutes must be 0, or at least 2" }
 
-    # Checked so a mistyped url fails here rather than silently never alerting
-    if ($settings.DiscordWebhookUrl -and
-        $settings.DiscordWebhookUrl -notmatch '^https://(discord\.com|discordapp\.com)/api/webhooks/\d+/[\w-]+$')
-    {
-        throw "Discord webhook must be a https://discord.com/api/webhooks/... url, or empty"
-    }
-    # A Discord user or role id is a 17 to 20 digit snowflake. Accepted with or without
-    # the <@...> wrapper, since that is what you get from Copy ID in some clients.
-    if ($settings.DiscordPingId)
-    {
-        if ($settings.DiscordPingId -notmatch '^<?@?&?(\d{17,20})>?$')
-        {
-            throw "Discord id to ping must be a user or role id (17 to 20 digits), or empty"
-        }
-        $settings.DiscordPingId = $Matches[1]
-    }
-    # Checked here so a typo is caught while you are looking at the dialog, rather than
-    # halfway through a run that is already clicking things
-    if ($settings.StepList)
-    {
-        try { Get-StepList $settings.StepList | Out-Null }
-        catch { throw "Steps: $($_.Exception.Message)" }
-    }
     if ($settings.DiscordSummaryMinutes -notmatch '^\d{1,4}$') { throw "Discord alerts every minutes must be a number (0 to turn it off)" }
     $summary = [int]$settings.DiscordSummaryMinutes
     if ($summary -ne 0 -and ($summary -lt 5 -or $summary -gt 1440)) { throw "Discord alerts every minutes must be 0, or between 5 and 1440" }
+
+    # And every server in turn
+    $serverList = @($settings.Servers)
+    if (-not $serverList.Count) { throw "There are no servers. Add one on the Servers tab." }
+
+    $seen = @{}
+    for ($index = 0; $index -lt $serverList.Count; $index++)
+    {
+        $server = $serverList[$index]
+        $label = if ("$($server.Name)".Trim()) { "$($server.Name)" } else { "Server $($index + 1)" }
+        Test-ServerSettings $server $label ($index -eq 0)
+
+        # The same account on two servers would have two sessions fighting over one
+        # client, so it is caught here rather than quietly dropped at launch
+        foreach ($accountName in (Get-ServerAccounts $server))
+        {
+            if ($seen.ContainsKey($accountName))
+            {
+                throw "$accountName is on both $($seen[$accountName]) and $label. An account can only farm one server."
+            }
+            $seen[$accountName] = $label
+        }
+    }
 }
 
 # Reopen the window on a bad value instead of throwing away everything that was typed
@@ -1604,20 +1749,23 @@ Save-Settings $settings
 $servers = @($settings.Servers)
 $mainAccount = $servers[0].MainAccount
 $altAccounts = @(Get-ServerAccounts $servers[0] | Where-Object { $_ -ne $mainAccount })
-$placeId = $settings.PlaceId
-$privateServerLink = $settings.PrivateServerLink                                     # full link, RAM resolves it; empty = public
 $accountManagerPort = [int]$settings.AccountManagerPort
 $accountManagerPassword = $settings.AccountManagerPassword
-$minimumFreeMegabytes = [int]$settings.MinimumFreeMegabytes
 $relaunchDelaySeconds = [int]$settings.RelaunchDelaySeconds
-$maximumSessionMinutes = [int]$settings.MaximumSessionMinutes
 $closeOtherClients = ($settings.CloseOtherClients -ne "False")
 $adoptOpenClients = ($settings.AdoptOpenClients -eq "True")
-$framerateCap = [int]$settings.FramerateCap
-$antiIdleMinutes = [int]$settings.AntiIdleMinutes
-$antiIdleKey = $settings.AntiIdleKey
-$aggressiveAntiIdle = ($settings.AggressiveAntiIdle -eq "True")
-# A-Z virtual key codes are the same numbers as their uppercase characters
+
+# The first server's, kept only as the answer when something asks before it knows which
+# server it is dealing with. Everything that runs per account reads the account's own
+# server instead.
+$placeId = $servers[0].PlaceId
+$privateServerLink = $servers[0].PrivateServerLink                                    # full link, RAM resolves it; empty = public
+$minimumFreeMegabytes = [int]$servers[0].MinimumFreeMegabytes
+$maximumSessionMinutes = [int]$servers[0].MaximumSessionMinutes
+$framerateCap = [int]$servers[0].FramerateCap
+$antiIdleMinutes = [int]$servers[0].AntiIdleMinutes
+$antiIdleKey = $servers[0].AntiIdleKey
+$aggressiveAntiIdle = ("$($servers[0].AggressiveAntiIdle)" -eq "True")
 $antiIdleAction = try { Get-AntiIdleAction $antiIdleKey } catch { $null }
 $reapStrayMinutes = [int]$settings.ReapStrayMinutes
 $useAllMonitors = ($settings.UseAllMonitors -ne "False")
@@ -1625,8 +1773,8 @@ $discordWebhookUrl = $settings.DiscordWebhookUrl
 $discordPingId = $settings.DiscordPingId
 $discordSummaryMinutes = [int]$settings.DiscordSummaryMinutes
 $rememberWindowPositions = ($settings.RememberWindowPositions -ne "False")
-$stepListText = $settings.StepList
-$runStepsOnRejoin = ($settings.RunStepsOnRejoin -eq "True")
+$stepListText = $servers[0].StepList
+$runStepsOnRejoin = ("$($servers[0].RunStepsOnRejoin)" -eq "True")
 $reportedStrays = @{}                                                                # windowed strays already mentioned, so the log is not spammed
 
 # ---- Watchdog ----------------------------------------------------------------------
@@ -3028,9 +3176,10 @@ for ($serverIndex = 0; $serverIndex -lt $servers.Count; $serverIndex++)
 $allAccounts = $allAccounts.ToArray()
 
 $sessions = @{}
-foreach ($accountName in $allAccounts)
+
+function New-SessionRecord($accountName, $serverIndex, $isMain)
 {
-    $sessions[$accountName] = @{ ProcessId = 0; ProcessStartTime = $null; StartedAt = $null
+    return @{ ProcessId = 0; ProcessStartTime = $null; StartedAt = $null
                                  RelaunchAfter = (Get-Date); LogPath = $null; LogOffset = 0; FailureCount = 0
                                  LastInputAt = $null; JoinedAt = $null
                                  State = "Idle"; StateSince = (Get-Date)
@@ -3043,9 +3192,86 @@ foreach ($accountName in $allAccounts)
                                  PendingDrop = $null; RelogCount = 0
                                  PendingAddress = $null; FocusRefusedSince = $null
                                  FocusRefusedCount = 0; ChallengeSeenAt = $null
-                                 ChallengeAlerted = $false; Account = $accountName
-                                 ServerIndex = $accountServer[$accountName]
-                                 IsMain = $accountIsMain[$accountName] }
+              ChallengeAlerted = $false; Account = $accountName
+              ServerIndex = $serverIndex; IsMain = $isMain }
+}
+
+foreach ($accountName in $allAccounts)
+{
+    $sessions[$accountName] = New-SessionRecord $accountName $accountServer[$accountName] $accountIsMain[$accountName]
+}
+
+function Sync-SessionsWithServers($newServers)
+{
+    # Takes a new list of servers and makes the running watchdog match it, without a
+    # restart. Accounts that are already up keep their session, their window and their
+    # history, and only learn which server they now belong to. New ones are added at the
+    # end of the list so nobody else's window slot shifts, and queued to launch one at a
+    # time like any other. An account that is no longer configured stops being watched
+    # but is left running: closing somebody's client because they edited a text box is
+    # not a thing to do without being asked.
+    $script:servers = @($newServers)
+
+    $wantedServer = @{}
+    $wantedMain = @{}
+    $wanted = New-Object System.Collections.Generic.List[string]
+    for ($serverIndex = 0; $serverIndex -lt $script:servers.Count; $serverIndex++)
+    {
+        $serverMain = "$($script:servers[$serverIndex].MainAccount)".Trim()
+        foreach ($accountName in (Get-ServerAccounts $script:servers[$serverIndex]))
+        {
+            if ($wantedServer.ContainsKey($accountName)) { continue }
+            $wantedServer[$accountName] = $serverIndex
+            $wantedMain[$accountName] = ($accountName -eq $serverMain)
+            $wanted.Add($accountName)
+        }
+    }
+
+    $dropped = @($script:allAccounts | Where-Object { -not $wantedServer.ContainsKey($_) })
+    foreach ($accountName in $dropped)
+    {
+        $stillUp = $script:sessions[$accountName].ProcessId -ne 0
+        $script:sessions.Remove($accountName)
+        Write-Log ("$accountName is no longer on any server, so it is not watched any more" +
+                   $(if ($stillUp) { ", and its window was left open" } else { "" }))
+    }
+
+    # Existing accounts first, in the order they already had, then anything new
+    $ordered = New-Object System.Collections.Generic.List[string]
+    foreach ($accountName in $script:allAccounts)
+    {
+        if ($wantedServer.ContainsKey($accountName)) { $ordered.Add($accountName) }
+    }
+    $added = New-Object System.Collections.Generic.List[string]
+    foreach ($accountName in $wanted)
+    {
+        if ($ordered.Contains($accountName)) { continue }
+        $ordered.Add($accountName)
+        $added.Add($accountName)
+    }
+    $script:allAccounts = $ordered.ToArray()
+
+    foreach ($accountName in $script:allAccounts)
+    {
+        if ($script:sessions.ContainsKey($accountName))
+        {
+            $script:sessions[$accountName].ServerIndex = $wantedServer[$accountName]
+            $script:sessions[$accountName].IsMain = $wantedMain[$accountName]
+        }
+        else
+        {
+            $script:sessions[$accountName] = New-SessionRecord $accountName $wantedServer[$accountName] $wantedMain[$accountName]
+        }
+    }
+
+    if ($added.Count)
+    {
+        # Spread out behind whatever is already waiting, so a new server does not launch
+        # five clients at once on top of a farm that is already running
+        Update-LaunchQueue $relaunchDelaySeconds
+        Write-Log ("added $($added.Count) account$(if ($added.Count -ne 1) { 's' }): $($added -join ', ')")
+    }
+    return @{ Added = $added.ToArray(); Dropped = $dropped }
 }
 
 function Get-SessionServer($session)
@@ -3396,6 +3622,51 @@ $runStepsButton.Add_Click({
     Start-StepRun $ready "you pressed Run"
 })
 
+$addServerButton = New-Object System.Windows.Forms.Button
+$addServerButton.Text = "Add server"
+$addServerButton.Location = New-Object System.Drawing.Point(14, 505)
+$addServerButton.Size = New-Object System.Drawing.Size(120, 27)
+Set-ThemedButton $addServerButton $false
+$statusForm.Controls.Add($addServerButton)
+
+$addServerButton.Add_Click({
+    # A whole farm added while the rest keeps running. The same window the settings use,
+    # so there is one place that knows what a server looks like.
+    $fresh = Get-DefaultServer
+    $fresh.Name = "Server $($servers.Count + 1)"
+    foreach ($key in "MaximumSessionMinutes", "AntiIdleMinutes", "AntiIdleKey", "AggressiveAntiIdle", "FramerateCap")
+    {
+        $fresh[$key] = $servers[0][$key]
+    }
+    $fresh.PlaceId = $servers[0].PlaceId
+
+    $added = Show-ServerWindow $fresh $servers.Count $false
+    if (-not $added) { return }
+
+    # Checked before anything is touched, including against the accounts already running,
+    # so a typo cannot leave the watchdog half changed
+    $candidate = @($servers) + @($added)
+    try
+    {
+        $trial = @{}
+        foreach ($key in $settings.Keys) { $trial[$key] = $settings[$key] }
+        $trial["Servers"] = $candidate
+        Test-Settings $trial
+    }
+    catch
+    {
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Check that server",
+            [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
+    }
+
+    $script:settings["Servers"] = $candidate
+    Save-Settings $script:settings
+    $changes = Sync-SessionsWithServers $candidate
+    Write-Log "added $($added.Name) from the window: $(@(Get-ServerAccounts $added) -join ', ')"
+    $headline.Text = "added $($added.Name), starting $($changes.Added.Count) account$(if ($changes.Added.Count -ne 1) { 's' })"
+})
+
 $exitButton = New-Object System.Windows.Forms.Button
 $exitButton.Text = "Exit"
 $exitButton.Location = New-Object System.Drawing.Point(450, 468)
@@ -3598,16 +3869,10 @@ $settingsButton.Add_Click({
     }
     Save-Settings $updated
 
-    # The numbers take effect straight away; the account list would need every session
-    # rebuilt, so that one waits for a restart
-    $script:minimumFreeMegabytes = [int]$updated.MinimumFreeMegabytes
+    # Servers first: that is what decides which accounts exist and what each one does
+    $changes = Sync-SessionsWithServers $updated.Servers
+
     $script:relaunchDelaySeconds = [int]$updated.RelaunchDelaySeconds
-    $script:maximumSessionMinutes = [int]$updated.MaximumSessionMinutes
-    $script:framerateCap = [int]$updated.FramerateCap
-    $script:antiIdleMinutes = [int]$updated.AntiIdleMinutes
-    $script:antiIdleKey = $updated.AntiIdleKey
-    $script:aggressiveAntiIdle = ($updated.AggressiveAntiIdle -eq "True")
-    $script:antiIdleAction = try { Get-AntiIdleAction $updated.AntiIdleKey } catch { $null }
     $script:reapStrayMinutes = [int]$updated.ReapStrayMinutes
     $script:closeOtherClients = ($updated.CloseOtherClients -ne "False")
     $script:adoptOpenClients = ($updated.AdoptOpenClients -eq "True")
@@ -3616,8 +3881,17 @@ $settingsButton.Add_Click({
     $script:discordPingId = $updated.DiscordPingId
     $script:discordSummaryMinutes = [int]$updated.DiscordSummaryMinutes
     $script:rememberWindowPositions = ($updated.RememberWindowPositions -ne "False")
-    $script:stepListText = $updated.StepList
-    $script:runStepsOnRejoin = ($updated.RunStepsOnRejoin -eq "True")
+
+    # The first server's, still only used as the answer before a server is known
+    $script:minimumFreeMegabytes = [int]$script:servers[0].MinimumFreeMegabytes
+    $script:maximumSessionMinutes = [int]$script:servers[0].MaximumSessionMinutes
+    $script:framerateCap = [int]$script:servers[0].FramerateCap
+    $script:antiIdleMinutes = [int]$script:servers[0].AntiIdleMinutes
+    $script:antiIdleKey = $script:servers[0].AntiIdleKey
+    $script:aggressiveAntiIdle = ("$($script:servers[0].AggressiveAntiIdle)" -eq "True")
+    $script:antiIdleAction = try { Get-AntiIdleAction $script:antiIdleKey } catch { $null }
+    $script:stepListText = $script:servers[0].StepList
+    $script:runStepsOnRejoin = ("$($script:servers[0].RunStepsOnRejoin)" -eq "True")
     if (-not $script:rememberWindowPositions)
     {
         # The file is kept and simply not used, rather than deleted. It used to be
@@ -3628,12 +3902,13 @@ $settingsButton.Add_Click({
     }
     Write-Log "settings saved and applied"
 
-    if ($updated.MainAccount -ne $mainAccount -or $updated.AltAccounts -ne $settings.AltAccounts)
+    # No restart needed any more: whatever changed is already live
+    if ($changes.Added.Count -or $changes.Dropped.Count)
     {
-        [System.Windows.Forms.MessageBox]::Show(
-            "Saved. The account list takes effect the next time you start the watchdog.",
-            "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+        $parts = @()
+        if ($changes.Added.Count) { $parts += "starting $($changes.Added.Count): $($changes.Added -join ', ')" }
+        if ($changes.Dropped.Count) { $parts += "no longer watching $($changes.Dropped -join ', ')" }
+        $headline.Text = ($parts -join "  and  ")
     }
 })
 
@@ -3653,6 +3928,11 @@ function Update-StatusUi
 
         $label = $accountName
         if ($sessions[$accountName].IsMain) { $label += "   (main)" }
+        if ($servers.Count -gt 1)
+        {
+            # Only worth the room when there is something to tell apart
+            $label += "   [$((Get-SessionServer $session).Name)]"
+        }
         $item.SubItems[1].Text = $label
         $item.SubItems[2].Text = Get-SessionStatusText $accountName
 

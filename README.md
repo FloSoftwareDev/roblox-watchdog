@@ -5,6 +5,7 @@ download
 what it does
 
 launches your alts into the private server through Roblox Account Manager (RAM, required, see below)
+runs as many private servers at once as you like, each with its own accounts and settings
 relaunches any account that crashes or gets kicked, main included
 leaves a client alone when the game teleports it and it comes straight back by itself
 notices a client that launched but never got into the game and relaunches it
@@ -29,10 +30,13 @@ RAM was archived in October 2024, so it isn't maintained any more, but 3.7.2 sti
 
 setup
 
+The settings window has five tabs. Servers is where your farms live; Account Manager, Windows, Alerts and Housekeeping are the settings that belong to the machine rather than to any one farm.
+
 In RAM go to Settings > Developer: turn on Enable Web Server, Allow LaunchAccount Method, and set a Webserver Password (6+ characters)
 Don't run RAM as admin, or autoclickers won't work on the Roblox windows. If you do run it as admin then the clients are admin too, and Windows won't let a normal program touch them: tiling, anti-idle and closing strays all get denied. In that case run the watchdog as admin as well. The window says which it is along the top.
 Start your main account first
-Fill in: alt usernames (one per line), place ID, private server link (paste the full share link), RAM port + password, and the limits
+On the Servers tab, edit the first server: place ID, private server link (paste the full share link), main username, alt usernames one per line, and that server's own limits
+Fill in your RAM port and password on the Account Manager tab
 Hit start and go touch grass
 
 The usernames have to match the accounts in RAM exactly, capitals included. RAM answers an unknown name with "Invalid Account" and nothing launches, so if an account never starts, check for a digit 1 where there should be a letter l, or an O where there should be a 0. The window and the log now say so instead of leaving you guessing.
@@ -143,6 +147,28 @@ tells you on Discord, because closing main is not something it should do quietly
 will not do it more than once every ten minutes.
 
 If you ever see it by hand, that is the fix: close every Roblox window, then start again.
+
+more than one server
+
+Each server on the Servers tab has its own private server link, place ID, main, alts, step list, relog timer, anti-idle key and interval, frame rate cap and memory limit. Add, Edit and Remove are under the list, and double clicking a server opens it.
+
+Only the first server has to have a main. Leave the main blank on the others and every account there is treated as an alt: relogged on the timer, closable to free memory, no step list. That is usually what you want for a farm you are not personally playing.
+
+A place ID per server means two different games at once, not just two private servers in the same game.
+
+The frame rate cap really is per server, even though Roblox only has one setting for it: the cap is written immediately before each launch and the client keeps whatever it read at startup.
+
+The memory limit works differently to the others, because free memory is one number for the whole machine rather than something each server has. A server's limit means "this server's alts may be closed when free memory is below this". So setting one server to 0 protects it while another gets sacrificed, which is more useful than one shared number.
+
+Only one step list runs at a time. A step run holds the keyboard and the foreground, so two mains setting up at once would fight over both; the other keeps its setup pending and gets its turn.
+
+An account can only be on one server. The settings window refuses to start if the same name is on two, because two sessions fighting over one client is not something to let happen quietly.
+
+adding a server without stopping anything
+
+Add server, in the watchdog window itself. It opens the same page as the settings and, once you press OK, that farm starts launching while everything already running carries on untouched: same sessions, same windows, same history, and the window slots of the accounts already up do not move. New accounts are queued one at a time like any other launch rather than all going at once.
+
+Taking a server out leaves its windows open. It stops being watched and the log says so, because closing somebody's clients over an edit to a text box is not a thing to do without asking.
 
 when Roblox asks you to verify an account
 
