@@ -123,6 +123,12 @@
 #                                         plaats van een lange kolom. Een server kan er tijdens het draaien bij, met
 #                                         de knop Add server: lopende accounts houden hun sessie en venster, nieuwe
 #                                         komen er achteraan bij en starten op hun beurt.
+# 019          07-10-2026 Miniwar AFK FG  Nieuw kleurenpalet: donker paars met magenta als accent en oranje voor een
+#                                         main. De tabbladen zijn geen TabControl meer maar eigen knoppen: Windows
+#                                         tekent tabkoppen zelf en negeert BackColor, en ook met OwnerDrawFixed blijft
+#                                         de strook eromheen wit. De serverlijst tekent zijn eigen regels, want een
+#                                         ListBox gebruikt anders het blauw van Windows. Add server stond bovenop de
+#                                         melding over de tray; het venster is 48 pixels hoger.
 #
 #------------------------------------------------------------------------------------#
 
@@ -162,7 +168,7 @@ $rejoinGraceSeconds = 30                                                        
 $migrationWitnesses = 2                                                              # accounts landing on the same new server before it counts as a move
 $relogWaveSize = 3                                                                   # accounts relogging together before it is worth saying so on its own
 $logLivenessSeconds = 120                                                            # a log written more recently than this belongs to a live client
-$watchdogVersion = "2.0.0"                                                           # the build stamps the exe with this too, and the exe wins at runtime
+$watchdogVersion = "2.1.0"                                                           # the build stamps the exe with this too, and the exe wins at runtime
 $releaseApiUrl = "https://api.github.com/repos/FloSoftwareDev/roblox-watchdog/releases/latest"
 $releasePageUrl = "https://github.com/FloSoftwareDev/roblox-watchdog/releases/latest"
 $versionCheckHours = 6                                                               # it runs for days at a time, so once at the start is not enough
@@ -476,15 +482,21 @@ trap
 # Flat dark. No gradients anywhere: one background, one raised surface, one hairline
 # border, two text weights, and colour used only where it carries meaning (the accent
 # for the thing you are meant to read first, green/amber/grey for account state).
-$themeBackground = [System.Drawing.Color]::FromArgb(27, 27, 31)
-$themeSurface    = [System.Drawing.Color]::FromArgb(35, 35, 41)
-$themeBorder     = [System.Drawing.Color]::FromArgb(52, 52, 61)
-$themeText       = [System.Drawing.Color]::FromArgb(232, 232, 236)
-$themeMuted      = [System.Drawing.Color]::FromArgb(138, 138, 149)
-$themeAccent     = [System.Drawing.Color]::FromArgb(88, 159, 214)
-$themeGreen      = [System.Drawing.Color]::FromArgb(76, 195, 138)
-$themeAmber      = [System.Drawing.Color]::FromArgb(224, 164, 88)
-$themeGrey       = [System.Drawing.Color]::FromArgb(110, 110, 122)
+# Flat fills only, no gradients. Raised is for the one thing that is selected, and the
+# second accent is kept for marking a main, so the first accent never has to mean two
+# different things at once.
+$themeBackground = [System.Drawing.Color]::FromArgb(23, 19, 31)                      # 17131F
+$themeSurface    = [System.Drawing.Color]::FromArgb(34, 27, 46)                      # 221B2E
+$themeRaised     = [System.Drawing.Color]::FromArgb(46, 36, 64)                      # 2E2440
+$themeBorder     = [System.Drawing.Color]::FromArgb(61, 49, 82)                      # 3D3152
+$themeText       = [System.Drawing.Color]::FromArgb(239, 233, 245)                   # EFE9F5
+$themeMuted      = [System.Drawing.Color]::FromArgb(151, 139, 168)                   # 978BA8
+$themeAccent     = [System.Drawing.Color]::FromArgb(232, 121, 199)                   # E879C7
+$themeAccent2    = [System.Drawing.Color]::FromArgb(251, 146, 60)                    # FB923C, a main
+$themeGreen      = [System.Drawing.Color]::FromArgb(74, 222, 128)                    # 4ADE80
+$themeAmber      = [System.Drawing.Color]::FromArgb(251, 191, 36)                    # FBBF24
+$themeRed        = [System.Drawing.Color]::FromArgb(251, 113, 133)                   # FB7185
+$themeGrey       = [System.Drawing.Color]::FromArgb(124, 112, 138)                   # paused, deliberately flat
 
 Add-Type @"
 using System;
@@ -531,9 +543,9 @@ function Set-ThemedButton($button, $isPrimary)
     if ($isPrimary)
     {
         $button.BackColor = $themeAccent
-        $button.ForeColor = [System.Drawing.Color]::FromArgb(16, 20, 26)
+        $button.ForeColor = $themeBackground                                           # dark text on the accent, so it reads
         $button.FlatAppearance.BorderColor = $themeAccent
-        $button.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(116, 178, 224)
+        $button.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(240, 150, 212)
     }
     else
     {
@@ -1070,18 +1082,95 @@ function Save-Settings($settings)
     }
 }
 
-function Add-ThemedTab($tabs, $caption)
+function Set-TabButtonLook($button, $isActive)
 {
-    # One page of the settings window. Its own panel so the rows inside can be laid out
-    # from the top left without minding what page it is on.
-    $page = New-Object System.Windows.Forms.TabPage
-    $page.Text = $caption
-    $page.BackColor = $themeBackground
-    $page.ForeColor = $themeText
-    $page.Padding = New-Object System.Windows.Forms.Padding(10)
-    $tabs.TabPages.Add($page)
-    return $page
+    $button.BackColor = if ($isActive) { $themeRaised } else { $themeBackground }
+    $button.ForeColor = if ($isActive) { $themeText } else { $themeMuted }
+    $button.FlatAppearance.MouseOverBackColor = if ($isActive) { $themeRaised } else { $themeSurface }
 }
+
+function Add-TabbedPages($container, $captions, $left, $top, $width, $height)
+{
+    # Our own tab row instead of a TabControl. Windows draws tab headers itself and
+    # ignores BackColor, which left a white strip across the top of a dark window.
+    # Owner drawing does not fix it either: DrawItem does fire, once per tab, but it only
+    # owns the tab item rectangles and the strip around and above them stays system
+    # painted. Sampling the rendered pixels showed 240,240,240 above the labels whatever
+    # was drawn. A row of flat buttons over panels is fully ours, and it is where the
+    # accent underline lives.
+    $rowHeight = 28
+    $pages = New-Object System.Collections.Specialized.OrderedDictionary
+    $buttons = New-Object System.Collections.Generic.List[object]
+
+    # the underline is one panel that moves to whichever button is active
+    $indicator = New-Object System.Windows.Forms.Panel
+    $indicator.BackColor = $themeAccent
+    $indicator.Size = New-Object System.Drawing.Size(10, 3)
+    # Sits just under the row rather than inside it. Overlapping the button meant
+    # depending on z-order, which paints correctly on screen but not in a DrawToBitmap
+    # render, so it could not be checked; clear of it, there is nothing to get wrong.
+    $indicator.Location = New-Object System.Drawing.Point($left, ($top + $rowHeight))
+    $container.Controls.Add($indicator)
+
+    $measureFont = New-Object System.Drawing.Font("Segoe UI", 9)
+    $graphics = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero)
+
+    $buttonLeft = $left
+    foreach ($caption in $captions)
+    {
+        $page = New-Object System.Windows.Forms.Panel
+        $page.Location = New-Object System.Drawing.Point($left, ($top + $rowHeight + 10))
+        $page.Size = New-Object System.Drawing.Size($width, ($height - $rowHeight - 10))
+        $page.BackColor = $themeBackground
+        $page.Visible = ($pages.Count -eq 0)
+        $container.Controls.Add($page)
+        $pages[$caption] = $page
+
+        $buttonWidth = [int][math]::Ceiling($graphics.MeasureString($caption, $measureFont).Width) + 22
+        $button = New-Object System.Windows.Forms.Button
+        $button.Text = $caption
+        $button.Tag = $caption
+        $button.FlatStyle = "Flat"
+        $button.FlatAppearance.BorderSize = 0
+        $button.UseVisualStyleBackColor = $false
+        $button.Cursor = "Hand"
+        $button.Location = New-Object System.Drawing.Point($buttonLeft, $top)
+        $button.Size = New-Object System.Drawing.Size($buttonWidth, $rowHeight)
+        Set-TabButtonLook $button ($pages.Count -eq 1)
+        $container.Controls.Add($button)
+        $buttons.Add($button)
+
+        if ($pages.Count -eq 1)
+        {
+            $indicator.Size = New-Object System.Drawing.Size($buttonWidth, 3)
+            $indicator.Location = New-Object System.Drawing.Point($buttonLeft, ($top + $rowHeight))
+        }
+        $buttonLeft += $buttonWidth + 2
+    }
+    $graphics.Dispose()
+
+    # One handler for every button, reading which one it was from the Tag, with the state
+    # hung off the container so the handler does not have to capture anything
+    # The indicator was added before the buttons so it would exist to be positioned,
+    # which also put it behind them: a three pixel underline under a button that covers
+    # it is not visible at all.
+    $indicator.BringToFront()
+
+    $container.Tag = @{ Pages = $pages; Buttons = $buttons; Indicator = $indicator; Top = $top; RowHeight = $rowHeight }
+    foreach ($button in $buttons)
+    {
+        $button.Add_Click({
+            $state = $this.Parent.Tag
+            foreach ($name in @($state.Pages.Keys)) { $state.Pages[$name].Visible = ($name -eq $this.Tag) }
+            foreach ($other in $state.Buttons) { Set-TabButtonLook $other ($other.Tag -eq $this.Tag) }
+            $state.Indicator.Size = New-Object System.Drawing.Size($this.Width, 3)
+            $state.Indicator.Location = New-Object System.Drawing.Point($this.Left, ($state.Top + $state.RowHeight))
+            $state.Indicator.BringToFront()
+        })
+    }
+    return $pages
+}
+
 
 function Add-FieldRow($page, $inputs, $labelText, $key, $value, $top, $height, $maskInput)
 {
@@ -1345,16 +1434,12 @@ function Show-SettingsWindow($saved)
     $form.MaximizeBox = $false
     Set-ThemedForm $form
 
-    $tabs = New-Object System.Windows.Forms.TabControl
-    $tabs.Location = New-Object System.Drawing.Point(10, 10)
-    $tabs.Size = New-Object System.Drawing.Size(546, 410)
-    $tabs.Appearance = "Normal"
-    $form.Controls.Add($tabs)
+    $pages = Add-TabbedPages $form @("Servers", "Account Manager", "Windows", "Alerts", "Housekeeping") 10 10 546 410
 
     $inputs = @{}
 
     # ---- Servers ---------------------------------------------------------------
-    $serversPage = Add-ThemedTab $tabs "Servers"
+    $serversPage = $pages["Servers"]
 
     $serverList = New-Object System.Windows.Forms.ListBox
     $serverList.Location = New-Object System.Drawing.Point(4, 8)
@@ -1362,6 +1447,35 @@ function Show-SettingsWindow($saved)
     $serverList.BackColor = $themeSurface
     $serverList.ForeColor = $themeText
     $serverList.BorderStyle = "FixedSingle"
+    $serverList.ItemHeight = 20
+
+    # Drawn by hand, because a ListBox paints its selected row in the Windows highlight
+    # colour and there is no property for it: against this background it came out as a
+    # band of bright blue. Unlike a TabControl, the whole item rectangle really is ours,
+    # so this works.
+    $serverList.DrawMode = "OwnerDrawFixed"
+    $serverList.Add_DrawItem({
+        param($drawn, $event)
+        if ($event.Index -lt 0) { return }
+        $isSelected = (($event.State -band [System.Windows.Forms.DrawItemState]::Selected) -ne 0)
+
+        $faceBrush = New-Object System.Drawing.SolidBrush($(if ($isSelected) { $themeRaised } else { $themeSurface }))
+        $event.Graphics.FillRectangle($faceBrush, $event.Bounds)
+        $faceBrush.Dispose()
+
+        if ($isSelected)
+        {
+            # a bar down the left rather than a filled highlight, so the row stays readable
+            $barBrush = New-Object System.Drawing.SolidBrush($themeAccent)
+            $event.Graphics.FillRectangle($barBrush, $event.Bounds.Left, $event.Bounds.Top, 3, $event.Bounds.Height)
+            $barBrush.Dispose()
+        }
+
+        $textBrush = New-Object System.Drawing.SolidBrush($(if ($isSelected) { $themeText } else { $themeMuted }))
+        $event.Graphics.DrawString($drawn.Items[$event.Index], $drawn.Font, $textBrush,
+                                   ($event.Bounds.Left + 9), ($event.Bounds.Top + 2))
+        $textBrush.Dispose()
+    })
     $serversPage.Controls.Add($serverList)
 
     $refreshServers = {
@@ -1442,7 +1556,7 @@ function Show-SettingsWindow($saved)
     })
 
     # ---- Account Manager -------------------------------------------------------
-    $ramPage = Add-ThemedTab $tabs "Account Manager"
+    $ramPage = $pages["Account Manager"]
     $top = 14
     $top = Add-FieldRow $ramPage $inputs "RAM web server port" "AccountManagerPort" $saved.AccountManagerPort $top 20 $false
     $top = Add-FieldRow $ramPage $inputs "RAM web server password" "AccountManagerPassword" $saved.AccountManagerPassword $top 20 $true
@@ -1458,7 +1572,7 @@ function Show-SettingsWindow($saved)
     $ramPage.Controls.Add($ramNote)
 
     # ---- Windows ---------------------------------------------------------------
-    $windowsPage = Add-ThemedTab $tabs "Windows"
+    $windowsPage = $pages["Windows"]
     $top = 14
     $top = Add-CheckRow $windowsPage $inputs "Close other Roblox windows on start" "CloseOtherClients" ($saved["CloseOtherClients"] -ne "False") $top
     $top = Add-CheckRow $windowsPage $inputs "Adopt the windows already open, launch nothing" "AdoptOpenClients" ($saved["AdoptOpenClients"] -eq "True") $top
@@ -1480,7 +1594,7 @@ function Show-SettingsWindow($saved)
     $windowsPage.Controls.Add($windowsNote)
 
     # ---- Alerts ----------------------------------------------------------------
-    $alertsPage = Add-ThemedTab $tabs "Alerts"
+    $alertsPage = $pages["Alerts"]
     $top = 14
     $top = Add-FieldRow $alertsPage $inputs "Discord webhook (optional)" "DiscordWebhookUrl" $saved.DiscordWebhookUrl $top 20 $false
     $webhookBox = $inputs["DiscordWebhookUrl"]
@@ -1538,7 +1652,7 @@ function Show-SettingsWindow($saved)
     $alertsPage.Controls.Add($alertsNote)
 
     # ---- Housekeeping ----------------------------------------------------------
-    $housePage = Add-ThemedTab $tabs "Housekeeping"
+    $housePage = $pages["Housekeeping"]
     $top = 14
     $top = Add-FieldRow $housePage $inputs "Close strays after min (0=off)" "ReapStrayMinutes" $saved.ReapStrayMinutes $top 20 $false
 
@@ -3417,7 +3531,7 @@ elseif ($closeOtherClients)
 
 $statusForm = New-Object System.Windows.Forms.Form
 $statusForm.Text = "Roblox Watchdog"
-$statusForm.Size = New-Object System.Drawing.Size(580, 600)
+$statusForm.Size = New-Object System.Drawing.Size(580, 648)                           # grown for the Add server row
 $statusForm.StartPosition = "CenterScreen"
 $statusForm.FormBorderStyle = "FixedSingle"
 $statusForm.MaximizeBox = $false
@@ -3433,13 +3547,13 @@ $elevationStrip.Padding = New-Object System.Windows.Forms.Padding(14, 0, 14, 0)
 if ($isElevated)
 {
     $elevationStrip.Text = "Running as administrator"
-    $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(24, 40, 32)
+    $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(22, 40, 34)           # green tinted, mixed against the new background
     $elevationStrip.ForeColor = $themeGreen
 }
 else
 {
     $elevationStrip.Text = "Not running as administrator. If Account Manager is elevated, tiling, anti-idle and closing strays will be denied."
-    $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(45, 36, 20)
+    $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(48, 36, 18)           # amber tinted
     $elevationStrip.ForeColor = $themeAmber
 }
 # Kept, because the update notice is added as a second line on this same strip rather
@@ -3675,7 +3789,7 @@ Set-ThemedButton $exitButton $false
 $statusForm.Controls.Add($exitButton)
 
 $hintLabel = New-Object System.Windows.Forms.Label
-$hintLabel.Location = New-Object System.Drawing.Point(14, 508)
+$hintLabel.Location = New-Object System.Drawing.Point(14, 546)                         # below Add server, which sits at 505
 $hintLabel.Size = New-Object System.Drawing.Size(536, 18)
 $hintLabel.ForeColor = $themeMuted
 $hintLabel.Text = "Closing this window keeps the watchdog running in the tray. Use Exit to stop it."
@@ -4064,7 +4178,7 @@ function Update-StatusUi
         {
             $elevationStrip.Text = ($elevationStripText + [char]0x000A +
                                     "Version $shownVersion is out and this is $(Get-OwnVersion). Click here to download it.")
-            $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(22, 38, 50)
+            $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(44, 26, 48)   # accent tinted, for the update notice
             $elevationStrip.ForeColor = $themeAccent
             $elevationStrip.Cursor = [System.Windows.Forms.Cursors]::Hand
         }
