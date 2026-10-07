@@ -138,7 +138,11 @@ $windowTimeoutSeconds = 60                                                      
 $windowSettleSeconds = 5                                                             # let Roblox restore its own size before moving it
 $manualMoveThreshold = 12                                                            # further than Roblox's own nudging, so only a real drag counts
 $stepGapMilliseconds = 200                                                           # between steps with no explicit wait of their own
-$stepRun = @{ Active = $false; Steps = @(); Index = 0; NextAt = $null; Reason = $null; HeldKey = $null }
+# Account, because with more than one server there is more than one main with a setup to
+# run. Only one runs at a time: a step run holds the keyboard and the foreground, so two
+# at once would fight over both. The others keep their setup pending and get their turn.
+$stepRun = @{ Active = $false; Steps = @(); Index = 0; NextAt = $null; Reason = $null; HeldKey = $null
+              Account = $null }
 $maximumLaunchFailures = 5                                                           # log loudly after this many failed launches in a row
 $logFolder = Join-Path $env:LOCALAPPDATA "Roblox\logs"                              # Roblox client log files
 $disconnectPattern = "Sending disconnect with reason: (\d+)"                         # logged on drop (277) and leave (285)
@@ -883,6 +887,64 @@ function Unprotect-Secret($protectedText)
     }
 }
 
+function Get-DefaultServer
+{
+    # One private server and the accounts that farm it. Everything here can differ from
+    # one server to the next; anything that belongs to the machine or to Account Manager
+    # is in the settings around it instead.
+    return @{
+        Name                  = "Server 1"
+        PlaceId               = ""
+        PrivateServerLink     = ""
+        MainAccount           = ""
+        AltAccounts           = ""
+        StepList              = ""
+        RunStepsOnRejoin      = "False"
+        MaximumSessionMinutes = "45"
+        AntiIdleMinutes       = "15"
+        AntiIdleKey           = "Space"
+        AggressiveAntiIdle    = "False"
+        FramerateCap          = "30"
+        MinimumFreeMegabytes  = "3000"
+    }
+}
+
+# The keys a server owns, which is also the list the migration copies across and the
+# settings window writes back. Kept in one place so the three cannot drift apart.
+$serverOwnedKeys = @("Name", "PlaceId", "PrivateServerLink", "MainAccount", "AltAccounts", "StepList",
+                     "RunStepsOnRejoin", "MaximumSessionMinutes", "AntiIdleMinutes", "AntiIdleKey",
+                     "AggressiveAntiIdle", "FramerateCap", "MinimumFreeMegabytes")
+
+function ConvertTo-ServerRecord($value)
+{
+    # Whatever came out of the json, laid over a full set of defaults so a server saved
+    # by an older version still has every key
+    $server = Get-DefaultServer
+    if ($value)
+    {
+        foreach ($property in $value.PSObject.Properties)
+        {
+            if ($serverOwnedKeys -contains $property.Name) { $server[$property.Name] = [string]$property.Value }
+        }
+    }
+    return $server
+}
+
+function Get-ServerAccounts($server)
+{
+    # Main first when there is one, then the alts. A server without a main is allowed:
+    # only the first one really needs somebody to set the rockets up.
+    $accounts = New-Object System.Collections.Generic.List[string]
+    $main = "$($server.MainAccount)".Trim()
+    if ($main) { $accounts.Add($main) }
+    foreach ($line in ("$($server.AltAccounts)" -split "`r?`n"))
+    {
+        $name = $line.Trim()
+        if ($name -and -not $accounts.Contains($name)) { $accounts.Add($name) }
+    }
+    return $accounts.ToArray()
+}
+
 function Get-DefaultSettings
 {
     return @{
@@ -909,6 +971,7 @@ function Get-DefaultSettings
         RememberWindowPositions = "True"
         StepList                = ""
         RunStepsOnRejoin        = "False"
+        Servers                 = @(Get-DefaultServer)
     }
 }
 
@@ -926,7 +989,26 @@ function Get-SavedSettings
     $json = Get-Content $path -Raw | ConvertFrom-Json
     foreach ($property in $json.PSObject.Properties)
     {
+        if ($property.Name -eq "Servers") { continue }                                 # a list, not a string
         $settings[$property.Name] = [string]$property.Value
+    }
+
+    # A file written before servers existed has the place, the link, the accounts and the
+    # rest at the top level. Those become the first server, so nobody has to type their
+    # setup in again.
+    if ($json.PSObject.Properties.Name -contains "Servers" -and $json.Servers)
+    {
+        $settings["Servers"] = @($json.Servers | ForEach-Object { ConvertTo-ServerRecord $_ })
+    }
+    else
+    {
+        $first = Get-DefaultServer
+        foreach ($key in $serverOwnedKeys)
+        {
+            if ($key -eq "Name") { continue }
+            if ($json.PSObject.Properties.Name -contains $key) { $first[$key] = [string]$json.$key }
+        }
+        $settings["Servers"] = @($first)
     }
 
     if ($settings["AccountManagerPasswordProtected"])
@@ -968,7 +1050,9 @@ function Save-Settings($settings)
     {
         New-Item -ItemType Directory -Path $settingsFolder -Force | Out-Null
     }
-    $toSave | ConvertTo-Json | Set-Content $settingsPath -Encoding UTF8
+    # Depth, because the servers are a list of records inside the object and the default
+    # of 2 would flatten them into strings that read "System.Collections.Hashtable"
+    $toSave | ConvertTo-Json -Depth 6 | Set-Content $settingsPath -Encoding UTF8
     Protect-SettingsFile $settingsPath
 
     # The old file kept the password in clear text, so it does not stay behind
@@ -1514,8 +1598,12 @@ while (-not $skipSettingsDialog)
 }
 Save-Settings $settings
 
-$mainAccount = $settings.MainAccount
-$altAccounts = $settings.AltAccounts -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+# The servers are the real list now. $mainAccount and $altAccounts stay as the first
+# server's, because the step list and a few log lines still read them, and because a
+# one server setup is what almost everyone has.
+$servers = @($settings.Servers)
+$mainAccount = $servers[0].MainAccount
+$altAccounts = @(Get-ServerAccounts $servers[0] | Where-Object { $_ -ne $mainAccount })
 $placeId = $settings.PlaceId
 $privateServerLink = $settings.PrivateServerLink                                     # full link, RAM resolves it; empty = public
 $accountManagerPort = [int]$settings.AccountManagerPort
@@ -1558,10 +1646,15 @@ function Get-FreeMegabytes
     return (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).FreePhysicalMemory / 1024
 }
 
-function Set-RobloxFramerateCap
+function Set-RobloxFramerateCap($cap)
 {
     # Roblox reads this once at client startup and rewrites the file when a client
-    # exits, so a closing client resets it to unlimited; reassert it before launching
+    # exits, so a closing client resets it to unlimited; reassert it before launching.
+    #
+    # Being read at startup is also what lets one server cap differently from another:
+    # the value is written immediately before that server's account is launched, and the
+    # client that starts keeps it.
+    $framerateCap = if ($null -eq $cap) { 0 } else { [int]$cap }
     if ($framerateCap -le 0) { return }
     $path = Join-Path $env:LOCALAPPDATA "Roblox\GlobalBasicSettings_13.xml"
     if (-not (Test-Path $path)) { return }
@@ -1927,14 +2020,17 @@ function Set-WindowFocused($handle)
 
 # ---- Step list ---------------------------------------------------------------------
 
-function Start-StepRun($reason)
+function Start-StepRun($accountName, $reason)
 {
     if ($script:stepRun.Active) { return }
-    if (-not $stepListText) { return }
+    if (-not $accountName -or -not $sessions.ContainsKey($accountName)) { return }
+
+    $stepText = (Get-SessionServer $sessions[$accountName]).StepList
+    if (-not $stepText) { return }
 
     try
     {
-        $steps = Get-StepList $stepListText
+        $steps = Get-StepList $stepText
     }
     catch
     {
@@ -1943,15 +2039,16 @@ function Start-StepRun($reason)
     }
     if ($steps.Count -eq 0) { return }
 
-    $session = $sessions[$mainAccount]
+    $session = $sessions[$accountName]
     if ($session.State -ne "Running" -or -not $session.JoinedAt)
     {
-        Write-Log "not running the steps: $mainAccount is not in the game"
+        Write-Log "not running the steps: $accountName is not in the game"
         return
     }
 
-    $script:stepRun = @{ Active = $true; Steps = $steps; Index = 0; NextAt = (Get-Date); Reason = $reason; HeldKey = $null }
-    Write-Log "running $($steps.Count) steps on $mainAccount ($reason)"
+    $script:stepRun = @{ Active = $true; Steps = $steps; Index = 0; NextAt = (Get-Date); Reason = $reason
+                         HeldKey = $null; Account = $accountName }
+    Write-Log "running $($steps.Count) steps on $accountName ($reason)"
 }
 
 function Stop-StepRun($reason)
@@ -1979,16 +2076,22 @@ function Step-StepRun
     if (-not $script:stepRun.Active) { return }
     if ((Get-Date) -lt $script:stepRun.NextAt) { return }
 
-    $session = $sessions[$mainAccount]
+    $stepAccount = $script:stepRun.Account
+    if (-not $stepAccount -or -not $sessions.ContainsKey($stepAccount))
+    {
+        Stop-StepRun "the account it was running on is gone"
+        return
+    }
+    $session = $sessions[$stepAccount]
     if ($session.State -ne "Running" -or -not $session.JoinedAt)
     {
-        Stop-StepRun "$mainAccount left the game"
+        Stop-StepRun "$stepAccount left the game"
         return
     }
 
     if ($script:stepRun.Index -ge $script:stepRun.Steps.Count)
     {
-        Write-Log "step run finished on $mainAccount"
+        Write-Log "step run finished on $stepAccount"
         Stop-StepRun "finished"
         return
     }
@@ -2003,14 +2106,14 @@ function Step-StepRun
     }
 
     $process = Get-SessionProcess $session
-    if (-not $process) { Stop-StepRun "$mainAccount is gone"; return }
+    if (-not $process) { Stop-StepRun "$stepAccount is gone"; return }
     $process.Refresh()
     $handle = $process.MainWindowHandle
-    if ($handle -eq [IntPtr]::Zero) { Stop-StepRun "$mainAccount has no window"; return }
+    if ($handle -eq [IntPtr]::Zero) { Stop-StepRun "$stepAccount has no window"; return }
 
     if (-not (Set-WindowFocused $handle))
     {
-        Stop-StepRun "could not focus $mainAccount"
+        Stop-StepRun "could not focus $stepAccount"
         Write-ElevationHint
         return
     }
@@ -2066,12 +2169,34 @@ function Step-StepRun
     $script:stepRun.NextAt = (Get-Date).AddMilliseconds($stepGapMilliseconds)
 }
 
-function Get-AntiIdleInterval
+function Get-ServerAntiIdleAction($server)
+{
+    # Parsed once per server and kept on the server record, because this runs on a timer
+    # and reparsing the same string every few minutes is work for nothing. A server
+    # whose field cannot be read falls back to Space rather than skipping the poke.
+    if (-not $server) { return $antiIdleAction }
+    if (-not $server.ContainsKey("ParsedAntiIdle") -or $server["ParsedAntiIdleFrom"] -ne "$($server.AntiIdleKey)")
+    {
+        $server["ParsedAntiIdleFrom"] = "$($server.AntiIdleKey)"
+        $server["ParsedAntiIdle"] = try { Get-AntiIdleAction $server.AntiIdleKey } catch { $null }
+    }
+    return $server["ParsedAntiIdle"]
+}
+
+function Test-ServerAggressive($server)
+{
+    if (-not $server) { return $aggressiveAntiIdle }
+    return ("$($server.AggressiveAntiIdle)" -eq "True")
+}
+
+function Get-AntiIdleInterval($server)
 {
     # Aggressive mode goes twice as often, with a floor of one minute. Roblox pulls the
     # plug at 20, so the normal setting is already capped at 18 in the settings window.
-    if (-not $aggressiveAntiIdle) { return $antiIdleMinutes }
-    return [math]::Max(1, [int][math]::Floor($antiIdleMinutes / 2))                     # floor, so 15 becomes 7 rather than 8
+    $minutes = if ($server) { [int]$server.AntiIdleMinutes } else { $antiIdleMinutes }
+    $aggressive = if ($server) { "$($server.AggressiveAntiIdle)" -eq "True" } else { $aggressiveAntiIdle }
+    if (-not $aggressive) { return $minutes }
+    return [math]::Max(1, [int][math]::Floor($minutes / 2))                             # floor, so 15 becomes 7 rather than 8
 
 }
 
@@ -2115,22 +2240,22 @@ function Send-AntiIdleClick($handle, $action)
     return $true
 }
 
-function Send-AntiIdleAction($handle)
+function Send-AntiIdleAction($handle, $action)
 {
-    # Whatever the setting asked for. Falls back to Space only if the setting could not
-    # be read at all, so a broken field still keeps the clients awake.
-    if (-not $antiIdleAction)
+    # Whatever this account's server asked for. Falls back to Space only if the setting
+    # could not be read at all, so a broken field still keeps the clients awake.
+    if (-not $action)
     {
         Send-AntiIdleKey ([byte]0x20) @()
         return "pressed Space"
     }
-    if ($antiIdleAction.Kind -eq "click")
+    if ($action.Kind -eq "click")
     {
-        if (Send-AntiIdleClick $handle $antiIdleAction) { return "clicked $($antiIdleAction.X),$($antiIdleAction.Y)" }
+        if (Send-AntiIdleClick $handle $action) { return "clicked $($action.X),$($action.Y)" }
         return $null
     }
-    Send-AntiIdleKey $antiIdleAction.Key $antiIdleAction.Modifiers
-    return "pressed $($antiIdleAction.Label)"
+    Send-AntiIdleKey $action.Key $action.Modifiers
+    return "pressed $($action.Label)"
 }
 
 function Send-AntiIdleInput($accountName)
@@ -2152,10 +2277,15 @@ function Send-AntiIdleInput($accountName)
 
     $previous = [Win32.Window]::GetForegroundWindow()                                 # give this back when done
 
+    # This account's own server decides what to send and how hard to try
+    $idleServer = Get-SessionServer $session
+    $aggressiveHere = Test-ServerAggressive $idleServer
+    $actionHere = Get-ServerAntiIdleAction $idleServer
+
     # Focus is refused often enough to matter: 1301 of 5867 attempts in one log, 22%,
     # and every refusal used to mean waiting another minute. Windows hands focus over
     # far more readily on the second or third ask, so ask again here instead.
-    $attempts = if ($aggressiveAntiIdle) { 4 } else { 2 }
+    $attempts = if ($aggressiveHere) { 4 } else { 2 }
     $focused = $false
     for ($attempt = 1; $attempt -le $attempts -and -not $focused; $attempt++)
     {
@@ -2166,7 +2296,7 @@ function Send-AntiIdleInput($accountName)
     if (-not $focused)
     {
         # Retry in a minute rather than fighting for focus on every tick
-        $session.LastInputAt = (Get-Date).AddMinutes(1 - (Get-AntiIdleInterval))
+        $session.LastInputAt = (Get-Date).AddMinutes(1 - (Get-AntiIdleInterval $idleServer))
 
         # Said once, then not again until it works. Windows refuses focus for as long as
         # someone is using the machine, and with six accounts each retrying every minute
@@ -2196,7 +2326,7 @@ function Send-AntiIdleInput($accountName)
         $session.FocusRefusedCount = 0
     }
 
-    if ($aggressiveAntiIdle)
+    if ($aggressiveHere)
     {
         # Aggressive ignores whatever the key or spot is set to and walks and jumps
         # instead. One tap of anything is enough for Roblox's own 20 minute timer, but a
@@ -2232,7 +2362,7 @@ function Send-AntiIdleInput($accountName)
     }
     else
     {
-        $did = Send-AntiIdleAction $handle
+        $did = Send-AntiIdleAction $handle $actionHere
         if (-not $did)
         {
             Write-Log "WARNING: could not read $accountName's window to click in, anti-idle skipped"
@@ -2253,11 +2383,17 @@ function Send-AntiIdleInput($accountName)
 
 function Get-LaunchUrl($accountName)
 {
+    # The place and the link come from this account's own server, which is the whole of
+    # what makes one server different from another as far as launching goes
+    $server = Get-SessionServer $sessions[$accountName]
     $launchUrl = "http://localhost:$accountManagerPort/LaunchAccount" +
                  "?Account=$([uri]::EscapeDataString($accountName))" +
-                 "&PlaceId=$placeId" +
+                 "&PlaceId=$($server.PlaceId)" +
                  "&Password=$([uri]::EscapeDataString($accountManagerPassword))"
-    if ($privateServerLink) { $launchUrl += "&JobId=$([uri]::EscapeDataString($privateServerLink))" }
+    if ($server.PrivateServerLink)
+    {
+        $launchUrl += "&JobId=$([uri]::EscapeDataString($server.PrivateServerLink))"
+    }
     return $launchUrl
 }
 
@@ -2308,7 +2444,7 @@ function Request-Launch($accountName)
     # Only asks RAM to launch. Watching for the client happens in Step-Launching, one
     # look per tick, so nothing blocks the status window.
     $session = $sessions[$accountName]
-    Set-RobloxFramerateCap                                                            # a client that just closed may have reset it
+    Set-RobloxFramerateCap (Get-SessionServer $session).FramerateCap                   # a client that just closed may have reset it
 
     $session.LaunchTrackedIds = @($sessions.Values | ForEach-Object { $_.ProcessId } | Where-Object { $_ -ne 0 })
     $session.LaunchedAt = Get-Date                                                    # log files after this are new
@@ -2829,7 +2965,10 @@ function Get-SessionStatusText($accountName)
     if ($session.State -eq "Idle")
     {
         # Said plainly, because otherwise a countdown sits at zero and looks stuck
-        if ($script:stepRun.Active -and $accountName -ne $mainAccount) { return "waiting for main's setup" }
+        if ($script:stepRun.Active -and $accountName -ne $script:stepRun.Account)
+        {
+            return "waiting for $($script:stepRun.Account)'s setup"
+        }
 
         $waitSeconds = [int](($session.RelaunchAfter - (Get-Date)).TotalSeconds)
         # "relaunching" is only true once it has actually been up
@@ -2860,8 +2999,34 @@ function Get-SessionColor($accountName)
 
 # ---- State ------------------------------------------------------------------------
 
-# Main first, so it is relaunched before any alt
-$allAccounts = @($mainAccount) + $altAccounts
+# Every account across every server, each one knowing which server it belongs to and
+# whether it is that server's main. Main first within a server, so it is relaunched
+# before any of its alts, and the servers in the order they were added.
+#
+# An account named twice is taken once, by the first server that claims it: the same
+# account cannot be in two servers at the same time anyway, and launching it twice
+# would have the two sessions fighting over one client.
+$accountServer = @{}
+$accountIsMain = @{}
+$allAccounts = New-Object System.Collections.Generic.List[string]
+for ($serverIndex = 0; $serverIndex -lt $servers.Count; $serverIndex++)
+{
+    $serverMain = "$($servers[$serverIndex].MainAccount)".Trim()
+    foreach ($accountName in (Get-ServerAccounts $servers[$serverIndex]))
+    {
+        if ($accountServer.ContainsKey($accountName))
+        {
+            Write-Log ("WARNING: $accountName is listed on more than one server, so it stays with " +
+                       "$($servers[$accountServer[$accountName]].Name)")
+            continue
+        }
+        $accountServer[$accountName] = $serverIndex
+        $accountIsMain[$accountName] = ($accountName -eq $serverMain)
+        $allAccounts.Add($accountName)
+    }
+}
+$allAccounts = $allAccounts.ToArray()
+
 $sessions = @{}
 foreach ($accountName in $allAccounts)
 {
@@ -2878,7 +3043,41 @@ foreach ($accountName in $allAccounts)
                                  PendingDrop = $null; RelogCount = 0
                                  PendingAddress = $null; FocusRefusedSince = $null
                                  FocusRefusedCount = 0; ChallengeSeenAt = $null
-                                 ChallengeAlerted = $false; Account = $accountName }
+                                 ChallengeAlerted = $false; Account = $accountName
+                                 ServerIndex = $accountServer[$accountName]
+                                 IsMain = $accountIsMain[$accountName] }
+}
+
+function Get-SessionServer($session)
+{
+    # The server a session belongs to. Falls back to the first one rather than returning
+    # nothing, so a session created before its server existed still launches somewhere.
+    $index = [int]$session.ServerIndex
+    if ($index -lt 0 -or $index -ge $servers.Count) { $index = 0 }
+    return $servers[$index]
+}
+
+function Get-StepReadyAccount
+{
+    # The first main that could have its setup run right now: in the game, with a step
+    # list on its own server. What the Run button acts on, and what decides whether it
+    # is clickable at all.
+    foreach ($accountName in $allAccounts)
+    {
+        $session = $sessions[$accountName]
+        if (-not $session.IsMain) { continue }
+        if ($session.State -ne "Running" -or -not $session.JoinedAt) { continue }
+        if (-not (Get-SessionServer $session).StepList) { continue }
+        return $accountName
+    }
+    return $null
+}
+
+function Get-MainAccounts
+{
+    # Every server's main, which is who must never be relogged on a timer or closed to
+    # free memory. A server is allowed to have none.
+    return @($allAccounts | Where-Object { $sessions[$_].IsMain })
 }
 
 $globalPaused = $false
@@ -2909,7 +3108,7 @@ else
     Write-Log "WARNING: and closing strays plus anti-idle focus will be denied. Run the exe as administrator, or stop"
     Write-Log "WARNING: running RAM as administrator."
 }
-Set-RobloxFramerateCap
+Set-RobloxFramerateCap $servers[0].FramerateCap
 if ($minimumFreeMegabytes -gt 0)
 {
     Write-Log "will kill the largest alt below $minimumFreeMegabytes MB available (now $([int](Get-FreeMegabytes)) MB)"
@@ -2944,9 +3143,14 @@ if ($adoptOpenClients -and $runningClients.Count -gt 1)
                    "left over with no account to match, so they are not tracked")
     }
 }
-elseif ($runningClients.Count)
+elseif ($runningClients.Count -and $allAccounts.Count)
 {
-    Register-AdoptedClient $mainAccount $runningClients[0] "main"
+    # The oldest window goes to the first account in the list, which is the first
+    # server's main when it has one. A first server with no main at all means the oldest
+    # window is simply its first alt.
+    $firstName = $allAccounts[0]
+    $role = if ($sessions[$firstName].IsMain) { "main" } else { "the first account" }
+    Register-AdoptedClient $firstName $runningClients[0] $role
 }
 Write-Log "alts: $($altAccounts -join ', ')"
 if ($discordWebhookUrl)
@@ -3187,7 +3391,9 @@ $statusForm.Controls.Add($runStepsButton)
 
 $runStepsButton.Add_Click({
     if ($script:stepRun.Active) { Stop-StepRun "you pressed Stop"; return }
-    Start-StepRun "you pressed Run"
+    $ready = Get-StepReadyAccount
+    if (-not $ready) { return }
+    Start-StepRun $ready "you pressed Run"
 })
 
 $exitButton = New-Object System.Windows.Forms.Button
@@ -3446,7 +3652,7 @@ function Update-StatusUi
         $item.ForeColor = $stateColor
 
         $label = $accountName
-        if ($accountName -eq $mainAccount) { $label += "   (main)" }
+        if ($sessions[$accountName].IsMain) { $label += "   (main)" }
         $item.SubItems[1].Text = $label
         $item.SubItems[2].Text = Get-SessionStatusText $accountName
 
@@ -3487,7 +3693,6 @@ function Update-StatusUi
     $headline.Text = "$playing / $($allAccounts.Count) accounts playing"
     if ($script:globalPaused) { $headline.Text = $headline.Text + "   (paused)" }
 
-    $mainIsIn = ($sessions[$mainAccount].State -eq "Running" -and $sessions[$mainAccount].JoinedAt)
     if ($script:stepRun.Active)
     {
         $runStepsButton.Enabled = $true
@@ -3495,7 +3700,9 @@ function Update-StatusUi
     }
     else
     {
-        $runStepsButton.Enabled = ($stepListText -and $mainIsIn -and -not $script:globalPaused)
+        # Clickable when some server's main is in the game with a setup to run, whichever
+        # server that turns out to be
+        $runStepsButton.Enabled = ((Get-StepReadyAccount) -and -not $script:globalPaused)
         $runStepsButton.Text = "Run"
     }
 
@@ -3635,6 +3842,11 @@ function Invoke-SlowChecks
         {
             $freeMegabytes = Get-FreeMegabytes
             $script:lastFreeMegabytes = [int]$freeMegabytes
+            # The highest threshold any server asked for: free memory is one number for
+            # the whole machine, so that is the point at which somebody wants something
+            # closed. Which server's alt gets closed is decided below.
+            $thresholds = @($servers | ForEach-Object { [int]$_.MinimumFreeMegabytes } | Where-Object { $_ -gt 0 })
+            $minimumFreeMegabytes = if ($thresholds.Count) { ($thresholds | Measure-Object -Maximum).Maximum } else { 0 }
             if ($freeMegabytes -ge $minimumFreeMegabytes) { $script:lowMemoryAlerted = $false }
 
             # A closing client takes a while to hand its memory back, and the check runs
@@ -3646,8 +3858,18 @@ function Invoke-SlowChecks
 
             if ($minimumFreeMegabytes -gt 0 -and $freeMegabytes -lt $minimumFreeMegabytes -and $killCooldownOver)
             {
+                # Never a main, on any server, and only an alt whose own server asked to
+                # be included: a server left at 0 is protected while another is not, so
+                # one farm can be sacrificed to keep another alive.
+                $mainProcessIds = @(Get-MainAccounts | ForEach-Object { $sessions[$_].ProcessId } | Where-Object { $_ -ne 0 })
+                $closableIds = @($allAccounts |
+                    Where-Object { -not $sessions[$_].IsMain -and $sessions[$_].ProcessId -ne 0 -and
+                                   [int](Get-SessionServer $sessions[$_]).MinimumFreeMegabytes -gt 0 -and
+                                   $freeMegabytes -lt [int](Get-SessionServer $sessions[$_]).MinimumFreeMegabytes } |
+                    ForEach-Object { $sessions[$_].ProcessId })
+
                 $largestAlt = Get-RobloxClients |
-                    Where-Object { $_.Id -ne $sessions[$mainAccount].ProcessId } |
+                    Where-Object { $mainProcessIds -notcontains $_.Id -and $closableIds -contains $_.Id } |
                     Sort-Object WorkingSet64 -Descending |
                     Select-Object -First 1
 
@@ -3789,7 +4011,7 @@ function Invoke-SlowChecks
                         $session.LastDropAt = Get-Date
                         $session.LastDropReason = "its process went away"
                         $droppedThisPass.Add("$accountName (its process went away)")
-                        if ($accountName -eq $mainAccount) { $mainDroppedThisPass = $true }
+                        if ($sessions[$accountName].IsMain) { $mainDroppedThisPass = $true }
                         Stop-Session $accountName "is gone"
                     }
                 }
@@ -3825,7 +4047,7 @@ function Invoke-SlowChecks
                                 $session.StepsPending = $true
                                 $session.PendingDrop = $null
                                 $reloggedThisPass.Add($accountName)
-                                if ($accountName -eq $mainAccount) { $mainReloggedThisPass = $true }
+                                if ($sessions[$accountName].IsMain) { $mainReloggedThisPass = $true }
                                 Write-Log ("$accountName relogged into $($logged.RejoinAddress) by itself " +
                                            "(reason $($logged.Reason)), so the client is left alone, but its " +
                                            "character and inventory are back to the start")
@@ -3858,7 +4080,7 @@ function Invoke-SlowChecks
                                 $session.RelogCount++
                                 $session.StepsPending = $true
                                 $reloggedThisPass.Add($accountName)
-                                if ($accountName -eq $mainAccount) { $mainReloggedThisPass = $true }
+                                if ($sessions[$accountName].IsMain) { $mainReloggedThisPass = $true }
                                 Write-Log ("$accountName relogged into $($logged.RejoinAddress) by itself after " +
                                            "reason $($session.PendingDrop.Reason), so the client is left alone, " +
                                            "but its character and inventory are back to the start")
@@ -3886,7 +4108,7 @@ function Invoke-SlowChecks
                             $session.LastDropAt = Get-Date
                             $session.LastDropReason = $realDropReason
                             $droppedThisPass.Add("$accountName (reason $realDropReason)")
-                            if ($accountName -eq $mainAccount) { $mainDroppedThisPass = $true }
+                            if ($sessions[$accountName].IsMain) { $mainDroppedThisPass = $true }
                             Stop-Session $accountName "disconnected (reason $realDropReason)"
                         }
                     }
@@ -3952,15 +4174,19 @@ function Invoke-SlowChecks
                                 Send-DiscordAlert "$accountName cannot join" ("It has launched and failed to get into the game " +
                                     "$maximumLaunchFailures times. The client is probably showing a join error such as 524, " +
                                     "which usually means the private server link is wrong or this account is not allowed in " +
-                                    "that server.") $alertRed ($accountName -eq $mainAccount)
+                                    "that server.") $alertRed $sessions[$accountName].IsMain
                             }
                         }
                     }
 
-                    if ($session.State -eq "Running" -and $accountName -ne $mainAccount -and $session.StartedAt -and
-                        ((Get-Date) - $session.StartedAt).TotalMinutes -gt $maximumSessionMinutes)
+                    # Every server relogs its own alts on its own timer, and no server's
+                    # main is ever relogged on one
+                    $relogAfter = [int](Get-SessionServer $session).MaximumSessionMinutes
+                    if ($session.State -eq "Running" -and -not $session.IsMain -and $relogAfter -gt 0 -and
+                        $session.StartedAt -and
+                        ((Get-Date) - $session.StartedAt).TotalMinutes -gt $relogAfter)
                     {
-                        Stop-Session $accountName "is older than $maximumSessionMinutes min"
+                        Stop-Session $accountName "is older than $relogAfter min"
                     }
                 }
 
@@ -4003,9 +4229,12 @@ function Invoke-SlowChecks
 
                 # Still running after the checks above, so it is due a keystroke if it
                 # has gone quiet
-                if ($antiIdleMinutes -gt 0 -and -not $script:globalPaused -and -not $antiIdleSentThisPass -and
+                $antiIdleServer = Get-SessionServer $session
+                if ([int]$antiIdleServer.AntiIdleMinutes -gt 0 -and -not $script:globalPaused -and
+                    -not $antiIdleSentThisPass -and
                     $session.State -eq "Running" -and -not $session.ChallengeSeenAt -and
-                    $session.LastInputAt -and ((Get-Date) - $session.LastInputAt).TotalMinutes -ge (Get-AntiIdleInterval))
+                    $session.LastInputAt -and
+                    ((Get-Date) - $session.LastInputAt).TotalMinutes -ge (Get-AntiIdleInterval $antiIdleServer))
                 {
                     Send-AntiIdleInput $accountName
                     $antiIdleSentThisPass = $true
@@ -4053,7 +4282,7 @@ function Invoke-SlowChecks
             $session.RelogCount++
             $session.StepsPending = $true
             $reloggedThisPass.Add($accountName)
-            if ($accountName -eq $mainAccount) { $mainReloggedThisPass = $true }
+            if ($sessions[$accountName].IsMain) { $mainReloggedThisPass = $true }
             Write-Log ("$accountName moved to $address with $($witnesses - 1) other account$(if ($witnesses -ne 2) { 's' }), " +
                        "so the private server moved rather than the account dropping (reason $reason)")
         }
@@ -4064,7 +4293,7 @@ function Invoke-SlowChecks
             $session.LastDropAt = Get-Date
             $session.LastDropReason = "$reason, left for $address on its own"
             $droppedThisPass.Add("$accountName (reason $reason, left for $address on its own)")
-            if ($accountName -eq $mainAccount) { $mainDroppedThisPass = $true }
+            if ($sessions[$accountName].IsMain) { $mainDroppedThisPass = $true }
             Stop-Session $accountName "came back on $address, which no other account is on"
         }
     }
@@ -4110,19 +4339,29 @@ function Invoke-SlowChecks
     # Main has just got back into the game, so the one-off setup is due again. With a step
     # list it either runs itself or waits for Run to be pressed; with none, there is
     # nothing to run and the notice below is the whole of it.
-    $mainSession = $sessions[$mainAccount]
+    # Each server's main, in order. A main whose turn cannot come yet keeps its setup
+    # pending rather than losing it, so it is picked up on a later pass.
     $stepsWaiting = $false
-    if ($stepListText -and $mainSession.StepsPending -and $mainSession.State -eq "Running" -and $mainSession.JoinedAt)
+    foreach ($mainName in (Get-MainAccounts))
     {
-        $mainSession.StepsPending = $false
-        if ($runStepsOnRejoin)
+        $mainSession = $sessions[$mainName]
+        if (-not $mainSession.StepsPending) { continue }
+        if ($mainSession.State -ne "Running" -or -not $mainSession.JoinedAt) { continue }
+
+        $mainServer = Get-SessionServer $mainSession
+        if (-not $mainServer.StepList) { continue }
+
+        if ("$($mainServer.RunStepsOnRejoin)" -eq "True")
         {
-            Start-StepRun "$mainAccount rejoined"
+            if ($script:stepRun.Active) { continue }                                   # its turn comes later
+            $mainSession.StepsPending = $false
+            Start-StepRun $mainName "$mainName rejoined"
         }
         else
         {
+            $mainSession.StepsPending = $false
             $stepsWaiting = $true
-            Write-Log "$mainAccount is back in the game, the steps are waiting for you to press Run"
+            Write-Log "$mainName is back in the game, the steps are waiting for you to press Run"
         }
     }
 
@@ -4133,14 +4372,20 @@ function Invoke-SlowChecks
     # means every one of them needs it. A single alt is logged and left at that.
     if ($mainReloggedThisPass -or $reloggedThisPass.Count -ge $relogWaveSize)
     {
-        $others = @($reloggedThisPass | Where-Object { $_ -ne $mainAccount })
-        if ($mainReloggedThisPass)
+        $mainsRelogged = @($reloggedThisPass | Where-Object { $sessions[$_].IsMain })
+        $others = @($reloggedThisPass | Where-Object { -not $sessions[$_].IsMain })
+        if ($mainsRelogged.Count)
         {
+            # Named rather than called "main", because with more than one server there is
+            # more than one main and knowing which one it was is the point of the message
+            $who = $mainsRelogged -join ", "
+            $hasSteps = @($mainsRelogged | Where-Object { (Get-SessionServer $sessions[$_]).StepList }).Count -gt 0
             $tail = if ($stepsWaiting) { "Press Run in the watchdog window to set it up again." }
-                    elseif ($stepListText) { "The steps are running now." }
+                    elseif ($hasSteps) { "The steps are running now." }
                     else { "Its inventory is back in the hotbar, so the rockets need placing again." }
             $withOthers = if ($others.Count) { "`n`nAlso relogged: $($others -join ', ')" } else { "" }
-            Send-DiscordAlert "Main relogged" ("$mainAccount went back into the game on its own, so it was not " +
+            $title = if ($mainsRelogged.Count -gt 1) { "$($mainsRelogged.Count) mains relogged" } else { "Main relogged" }
+            Send-DiscordAlert $title ("$who went back into the game on its own, so it was not " +
                 "relaunched and nothing is broken.`n`n$tail$withOthers") $alertAmber $true
         }
         else
