@@ -129,6 +129,17 @@
 #                                         de strook eromheen wit. De serverlijst tekent zijn eigen regels, want een
 #                                         ListBox gebruikt anders het blauw van Windows. Add server stond bovenop de
 #                                         melding over de tray; het venster is 48 pixels hoger.
+# 020          08-10-2026 Miniwar AFK FG  Kleurenpalet bijgewerkt: diep donkerpaars met zacht violet als accent in
+#                                         plaats van magenta, en goud voor een main. Knoppen en vinkjes zijn afgerond en tekenen zichzelf
+#                                         (RoundButton, RoundCheckBox: een platte CheckBox negeert CheckedBackColor),
+#                                         de tabbladen zijn pillen in plaats van knoppen met een streep eronder, en
+#                                         de geselecteerde accountregel is niet meer Windows-blauw. Overlappingen
+#                                         opgelost: de kolomkoppen waren 120 breed en Memory dekte Up af, de notitie
+#                                         bij een optionele main lag over het vak eronder, en de strook bovenin had
+#                                         geen ruimte voor een derde regel. Alle vensters hebben nu 16 pixels marge
+#                                         en gelijke tussenruimtes; Add server staat in de onderste knoppenrij.
+#                                         Eigen icoon (RobloxWatchdog.ico, een violet oog) voor de exe, de vensters
+#                                         en de tray, in plaats van het lege standaardicoon van Windows.
 #
 #------------------------------------------------------------------------------------#
 
@@ -479,24 +490,25 @@ trap
 
 # ---- Theme --------------------------------------------------------------------------
 
-# Flat dark. No gradients anywhere: one background, one raised surface, one hairline
-# border, two text weights, and colour used only where it carries meaning (the accent
-# for the thing you are meant to read first, green/amber/grey for account state).
-# Flat fills only, no gradients. Raised is for the one thing that is selected, and the
-# second accent is kept for marking a main, so the first accent never has to mean two
-# different things at once.
-$themeBackground = [System.Drawing.Color]::FromArgb(23, 19, 31)                      # 17131F
-$themeSurface    = [System.Drawing.Color]::FromArgb(34, 27, 46)                      # 221B2E
-$themeRaised     = [System.Drawing.Color]::FromArgb(46, 36, 64)                      # 2E2440
-$themeBorder     = [System.Drawing.Color]::FromArgb(61, 49, 82)                      # 3D3152
-$themeText       = [System.Drawing.Color]::FromArgb(239, 233, 245)                   # EFE9F5
-$themeMuted      = [System.Drawing.Color]::FromArgb(151, 139, 168)                   # 978BA8
-$themeAccent     = [System.Drawing.Color]::FromArgb(232, 121, 199)                   # E879C7
-$themeAccent2    = [System.Drawing.Color]::FromArgb(251, 146, 60)                    # FB923C, a main
-$themeGreen      = [System.Drawing.Color]::FromArgb(74, 222, 128)                    # 4ADE80
-$themeAmber      = [System.Drawing.Color]::FromArgb(251, 191, 36)                    # FBBF24
-$themeRed        = [System.Drawing.Color]::FromArgb(251, 113, 133)                   # FB7185
-$themeGrey       = [System.Drawing.Color]::FromArgb(124, 112, 138)                   # paused, deliberately flat
+# Deep purple, flat. No gradients or shadows anywhere: one near-black purple background,
+# one surface for inputs, one raised fill for buttons and selection, one hairline border,
+# two text weights, and colour used only where it carries meaning (violet for the thing
+# you are meant to read first, green/amber/grey for account state). The second accent is
+# kept for marking a main, so the first never has to mean two different things at once.
+$themeBackground  = [System.Drawing.Color]::FromArgb(21, 16, 31)                     # 15101F
+$themeSurface     = [System.Drawing.Color]::FromArgb(31, 24, 48)                     # 1F1830
+$themeRaised      = [System.Drawing.Color]::FromArgb(43, 33, 66)                     # 2B2142
+$themeBorder      = [System.Drawing.Color]::FromArgb(62, 49, 89)                     # 3E3159
+$themeText        = [System.Drawing.Color]::FromArgb(238, 232, 247)                  # EEE8F7
+$themeMuted       = [System.Drawing.Color]::FromArgb(157, 144, 181)                  # 9D90B5
+$themeAccent      = [System.Drawing.Color]::FromArgb(165, 124, 240)                  # A57CF0, violet
+$themeAccentHover = [System.Drawing.Color]::FromArgb(184, 150, 245)                  # B896F5
+$themeAccentSoft  = [System.Drawing.Color]::FromArgb(51, 38, 79)                     # 33264F, violet tinted fill
+$themeAccent2     = [System.Drawing.Color]::FromArgb(240, 184, 96)                   # F0B860, a main
+$themeGreen       = [System.Drawing.Color]::FromArgb(125, 211, 160)                  # 7DD3A0
+$themeAmber       = [System.Drawing.Color]::FromArgb(242, 193, 78)                   # F2C14E
+$themeRed         = [System.Drawing.Color]::FromArgb(240, 98, 122)                   # F0627A
+$themeGrey        = [System.Drawing.Color]::FromArgb(138, 127, 158)                  # paused, deliberately flat
 
 Add-Type @"
 using System;
@@ -504,6 +516,154 @@ using System.Runtime.InteropServices;
 public class DarkFrame
 {
     [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)] public static extern uint ExtractIconEx(string file, int index, IntPtr[] large, IntPtr[] small, uint count);
+}
+"@
+
+# A flat button with rounded corners. WinForms has no corner radius, and clipping a normal
+# button with a Region gives jagged corners, so this one paints itself: the parent's colour
+# first, then an anti-aliased rounded fill and hairline, then the text.
+Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @"
+using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Windows.Forms;
+public class RoundButton : Button
+{
+    public int Radius = 8;
+    public Color FillColor = Color.DimGray;
+    public Color HoverColor = Color.Gray;
+    public Color PressColor = Color.DarkGray;
+    public Color LineColor = Color.Transparent;
+    public Color DisabledFillColor = Color.DimGray;
+    public Color DisabledLineColor = Color.Transparent;
+    public Color DisabledTextColor = Color.Gray;
+    public Color FocusColor = Color.Orange;
+    private bool hovering;
+    private bool pressing;
+
+    public RoundButton()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        FlatStyle = FlatStyle.Flat;
+        FlatAppearance.BorderSize = 0;
+        Cursor = Cursors.Hand;
+    }
+
+    protected override void OnMouseEnter(EventArgs e) { hovering = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { hovering = false; pressing = false; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnMouseDown(MouseEventArgs e) { if (e.Button == MouseButtons.Left) { pressing = true; Invalidate(); } base.OnMouseDown(e); }
+    protected override void OnMouseUp(MouseEventArgs e) { pressing = false; Invalidate(); base.OnMouseUp(e); }
+    protected override void OnEnabledChanged(EventArgs e) { hovering = false; pressing = false; Invalidate(); base.OnEnabledChanged(e); }
+
+    private static GraphicsPath Rounded(RectangleF bounds, float radius)
+    {
+        float diameter = Math.Min(radius * 2, Math.Min(bounds.Width, bounds.Height));
+        GraphicsPath path = new GraphicsPath();
+        path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 180, 90);
+        path.AddArc(bounds.Right - diameter, bounds.Top, diameter, diameter, 270, 90);
+        path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
+        path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        Graphics g = e.Graphics;
+        g.Clear(Parent != null ? Parent.BackColor : BackColor);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        Color fill = !Enabled ? DisabledFillColor : pressing ? PressColor : hovering ? HoverColor : FillColor;
+        RectangleF bounds = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f);
+        using (GraphicsPath path = Rounded(bounds, Radius))
+        {
+            using (SolidBrush brush = new SolidBrush(fill)) { g.FillPath(brush, path); }
+            // a disabled button keeps a faint outline so it still reads as a button
+            Color line = Enabled ? LineColor : DisabledLineColor;
+            if (line.A > 0)
+            {
+                using (Pen pen = new Pen(line)) { g.DrawPath(pen, path); }
+            }
+        }
+        if (Focused && ShowFocusCues && Enabled)
+        {
+            RectangleF inner = new RectangleF(1.5f, 1.5f, Width - 3f, Height - 3f);
+            using (GraphicsPath ring = Rounded(inner, Math.Max(Radius - 1, 1)))
+            using (Pen pen = new Pen(FocusColor)) { g.DrawPath(pen, ring); }
+        }
+
+        TextRenderer.DrawText(g, Text, Font, ClientRectangle, Enabled ? ForeColor : DisabledTextColor,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+            TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+    }
+
+    internal static GraphicsPath RoundedPath(RectangleF bounds, float radius) { return Rounded(bounds, radius); }
+}
+
+// The same idea for a tickbox: a flat CheckBox ignores CheckedBackColor for its box and
+// paints it a pale grey, so this draws a small rounded square, violet with a dark tick
+// when it is on.
+public class RoundCheckBox : CheckBox
+{
+    public Color BoxColor = Color.DimGray;
+    public Color LineColor = Color.Gray;
+    public Color HoverLineColor = Color.Orange;
+    public Color CheckedColor = Color.Orange;
+    public Color MarkColor = Color.Black;
+    public Color DisabledTextColor = Color.Gray;
+    private bool hovering;
+
+    public RoundCheckBox()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        Cursor = Cursors.Hand;
+    }
+
+    protected override void OnMouseEnter(EventArgs e) { hovering = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { hovering = false; Invalidate(); base.OnMouseLeave(e); }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        Graphics g = e.Graphics;
+        g.Clear(Parent != null ? Parent.BackColor : BackColor);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        const int size = 14;
+        RectangleF box = new RectangleF(0.5f, (Height - size) / 2 + 0.5f, size, size);
+        using (GraphicsPath path = RoundButton.RoundedPath(box, 4))
+        {
+            using (SolidBrush brush = new SolidBrush(Checked ? CheckedColor : BoxColor)) { g.FillPath(brush, path); }
+            if (!Checked)
+            {
+                using (Pen pen = new Pen(hovering && Enabled ? HoverLineColor : LineColor)) { g.DrawPath(pen, path); }
+            }
+        }
+        if (Checked)
+        {
+            using (Pen mark = new Pen(MarkColor, 2f))
+            {
+                mark.StartCap = LineCap.Round; mark.EndCap = LineCap.Round; mark.LineJoin = LineJoin.Round;
+                g.DrawLines(mark, new PointF[] {
+                    new PointF(box.Left + 3.5f, box.Top + 7.5f),
+                    new PointF(box.Left + 6f,   box.Top + 10f),
+                    new PointF(box.Left + 10.5f, box.Top + 4.5f) });
+            }
+        }
+        if (Focused && ShowFocusCues)
+        {
+            RectangleF ring = new RectangleF(box.Left - 2, box.Top - 2, box.Width + 4, box.Height + 4);
+            using (GraphicsPath path = RoundButton.RoundedPath(ring, 5))
+            using (Pen pen = new Pen(HoverLineColor)) { g.DrawPath(pen, path); }
+        }
+
+        Rectangle text = new Rectangle(size + 6, 0, Width - size - 6, Height);
+        TextRenderer.DrawText(g, Text, Font, text, Enabled ? ForeColor : DisabledTextColor,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
+            TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+    }
 }
 "@
 
@@ -526,34 +686,75 @@ function Set-DarkTitleBar($form)
     }
 }
 
+function Get-AppIcons
+{
+    # The violet eye, for the title bars and the tray. Compiled, it is the icon the build
+    # put in the exe, read back at both sizes so the 16 pixel tray icon is the one drawn
+    # for 16 pixels rather than the 32 one shrunk. Run as a .ps1 it is the .ico beside the
+    # script. Without either, the Windows default, which is what it always used to be.
+    try
+    {
+        $exePath = [Environment]::GetCommandLineArgs()[0]
+        if ($exePath -like "*.exe" -and (Get-Item $exePath).VersionInfo.ProductName -eq "Roblox Watchdog")
+        {
+            $large = New-Object IntPtr[] 1
+            $small = New-Object IntPtr[] 1
+            if ([DarkFrame]::ExtractIconEx($exePath, 0, $large, $small, 1) -gt 0 -and $large[0] -ne [IntPtr]::Zero)
+            {
+                return @{ Large = [System.Drawing.Icon]::FromHandle($large[0])
+                          Small = if ($small[0] -ne [IntPtr]::Zero) { [System.Drawing.Icon]::FromHandle($small[0]) } else { [System.Drawing.Icon]::FromHandle($large[0]) } }
+            }
+        }
+        $icoPath = Join-Path $scriptFolder "RobloxWatchdog.ico"
+        if (Test-Path $icoPath)
+        {
+            return @{ Large = New-Object System.Drawing.Icon($icoPath, 32, 32)
+                      Small = New-Object System.Drawing.Icon($icoPath, 16, 16) }
+        }
+    }
+    catch
+    {
+        # a default icon is not worth failing over
+    }
+    return @{ Large = [System.Drawing.SystemIcons]::Application; Small = [System.Drawing.SystemIcons]::Application }
+}
+$appIcons = Get-AppIcons
+
 function Set-ThemedForm($form)
 {
     $form.BackColor = $themeBackground
     $form.ForeColor = $themeText
     $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $form.Icon = $appIcons.Large
     $form.Add_Shown({ Set-DarkTitleBar $args[0] })
 }
 
 function Set-ThemedButton($button, $isPrimary)
 {
-    $button.FlatStyle = "Flat"
+    # Expects a RoundButton: the colours are its own, since it paints itself
     $button.UseVisualStyleBackColor = $false
-    $button.FlatAppearance.BorderSize = 1
-    $button.Cursor = "Hand"
+    $button.DisabledFillColor = $themeSurface
+    $button.DisabledLineColor = $themeRaised
+    $button.DisabledTextColor = $themeGrey
+    $button.FocusColor = $themeAccent
     if ($isPrimary)
     {
-        $button.BackColor = $themeAccent
+        $button.FillColor = $themeAccent
+        $button.HoverColor = $themeAccentHover
+        $button.PressColor = $themeAccent
+        $button.LineColor = [System.Drawing.Color]::Transparent
         $button.ForeColor = $themeBackground                                           # dark text on the accent, so it reads
-        $button.FlatAppearance.BorderColor = $themeAccent
-        $button.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(240, 150, 212)
+        $button.FocusColor = $themeText                                                # a violet ring would vanish on a violet fill
     }
     else
     {
-        $button.BackColor = $themeSurface
+        $button.FillColor = $themeRaised
+        $button.HoverColor = $themeBorder
+        $button.PressColor = $themeSurface
+        $button.LineColor = $themeBorder
         $button.ForeColor = $themeText
-        $button.FlatAppearance.BorderColor = $themeBorder
-        $button.FlatAppearance.MouseOverBackColor = $themeBorder
     }
+    $button.Invalidate()
 }
 
 function Set-ThemedInput($control)
@@ -1084,9 +1285,11 @@ function Save-Settings($settings)
 
 function Set-TabButtonLook($button, $isActive)
 {
-    $button.BackColor = if ($isActive) { $themeRaised } else { $themeBackground }
-    $button.ForeColor = if ($isActive) { $themeText } else { $themeMuted }
-    $button.FlatAppearance.MouseOverBackColor = if ($isActive) { $themeRaised } else { $themeSurface }
+    $button.FillColor = if ($isActive) { $themeAccentSoft } else { $themeBackground }
+    $button.HoverColor = if ($isActive) { $themeAccentSoft } else { $themeSurface }
+    $button.PressColor = $button.HoverColor
+    $button.ForeColor = if ($isActive) { $themeAccentHover } else { $themeMuted }
+    $button.Invalidate()
 }
 
 function Add-TabbedPages($container, $captions, $left, $top, $width, $height)
@@ -1096,21 +1299,11 @@ function Add-TabbedPages($container, $captions, $left, $top, $width, $height)
     # Owner drawing does not fix it either: DrawItem does fire, once per tab, but it only
     # owns the tab item rectangles and the strip around and above them stays system
     # painted. Sampling the rendered pixels showed 240,240,240 above the labels whatever
-    # was drawn. A row of flat buttons over panels is fully ours, and it is where the
-    # accent underline lives.
+    # was drawn. A row of pill buttons over panels is fully ours, and the violet tinted
+    # pill is what says which page is showing.
     $rowHeight = 28
     $pages = New-Object System.Collections.Specialized.OrderedDictionary
     $buttons = New-Object System.Collections.Generic.List[object]
-
-    # the underline is one panel that moves to whichever button is active
-    $indicator = New-Object System.Windows.Forms.Panel
-    $indicator.BackColor = $themeAccent
-    $indicator.Size = New-Object System.Drawing.Size(10, 3)
-    # Sits just under the row rather than inside it. Overlapping the button meant
-    # depending on z-order, which paints correctly on screen but not in a DrawToBitmap
-    # render, so it could not be checked; clear of it, there is nothing to get wrong.
-    $indicator.Location = New-Object System.Drawing.Point($left, ($top + $rowHeight))
-    $container.Controls.Add($indicator)
 
     $measureFont = New-Object System.Drawing.Font("Segoe UI", 9)
     $graphics = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero)
@@ -1126,46 +1319,31 @@ function Add-TabbedPages($container, $captions, $left, $top, $width, $height)
         $container.Controls.Add($page)
         $pages[$caption] = $page
 
-        $buttonWidth = [int][math]::Ceiling($graphics.MeasureString($caption, $measureFont).Width) + 22
-        $button = New-Object System.Windows.Forms.Button
+        $buttonWidth = [int][math]::Ceiling($graphics.MeasureString($caption, $measureFont).Width) + 28
+        $button = New-Object RoundButton
         $button.Text = $caption
         $button.Tag = $caption
-        $button.FlatStyle = "Flat"
-        $button.FlatAppearance.BorderSize = 0
         $button.UseVisualStyleBackColor = $false
-        $button.Cursor = "Hand"
+        $button.Radius = 14                                                            # half the row height, so a pill
+        $button.FocusColor = $themeAccent
         $button.Location = New-Object System.Drawing.Point($buttonLeft, $top)
         $button.Size = New-Object System.Drawing.Size($buttonWidth, $rowHeight)
         Set-TabButtonLook $button ($pages.Count -eq 1)
         $container.Controls.Add($button)
         $buttons.Add($button)
-
-        if ($pages.Count -eq 1)
-        {
-            $indicator.Size = New-Object System.Drawing.Size($buttonWidth, 3)
-            $indicator.Location = New-Object System.Drawing.Point($buttonLeft, ($top + $rowHeight))
-        }
-        $buttonLeft += $buttonWidth + 2
+        $buttonLeft += $buttonWidth + 6
     }
     $graphics.Dispose()
 
     # One handler for every button, reading which one it was from the Tag, with the state
     # hung off the container so the handler does not have to capture anything
-    # The indicator was added before the buttons so it would exist to be positioned,
-    # which also put it behind them: a three pixel underline under a button that covers
-    # it is not visible at all.
-    $indicator.BringToFront()
-
-    $container.Tag = @{ Pages = $pages; Buttons = $buttons; Indicator = $indicator; Top = $top; RowHeight = $rowHeight }
+    $container.Tag = @{ Pages = $pages; Buttons = $buttons }
     foreach ($button in $buttons)
     {
         $button.Add_Click({
             $state = $this.Parent.Tag
             foreach ($name in @($state.Pages.Keys)) { $state.Pages[$name].Visible = ($name -eq $this.Tag) }
             foreach ($other in $state.Buttons) { Set-TabButtonLook $other ($other.Tag -eq $this.Tag) }
-            $state.Indicator.Size = New-Object System.Drawing.Size($this.Width, 3)
-            $state.Indicator.Location = New-Object System.Drawing.Point($this.Left, ($state.Top + $state.RowHeight))
-            $state.Indicator.BringToFront()
         })
     }
     return $pages
@@ -1204,14 +1382,19 @@ function Add-FieldRow($page, $inputs, $labelText, $key, $value, $top, $height, $
 
 function Add-CheckRow($page, $inputs, $labelText, $key, $checked, $top)
 {
-    $box = New-Object System.Windows.Forms.CheckBox
+    $box = New-Object RoundCheckBox
     $box.Text = $labelText
     $box.Location = New-Object System.Drawing.Point(220, $top)
     $box.Size = New-Object System.Drawing.Size(312, 20)                             # fits the longest label, which is the aggressive one at 307 px
 
     $box.Checked = $checked
-    $box.FlatStyle = "Flat"
     $box.ForeColor = $themeText
+    $box.BoxColor = $themeSurface
+    $box.LineColor = $themeBorder
+    $box.HoverLineColor = $themeAccent
+    $box.CheckedColor = $themeAccent                                                 # a ticked box is a violet square
+    $box.MarkColor = $themeBackground
+    $box.DisabledTextColor = $themeGrey
     $page.Controls.Add($box)
     $inputs[$key] = $box
     return ($top + 26)
@@ -1236,47 +1419,53 @@ function Show-ServerWindow($server, $index, $isFirst)
 
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Server settings"
-    $form.Size = New-Object System.Drawing.Size(580, 680)
+    $form.ClientSize = New-Object System.Drawing.Size(564, 640)                       # height set again below, once the rows are in
     $form.StartPosition = "CenterParent"
     $form.FormBorderStyle = "FixedSingle"
     $form.MaximizeBox = $false
     $form.MinimizeBox = $false
     Set-ThemedForm $form
 
+    # Everything sits on one panel inset from the edges, so no caption touches the frame
+    $body = New-Object System.Windows.Forms.Panel
+    $body.Location = New-Object System.Drawing.Point(16, 0)
+    $body.Size = New-Object System.Drawing.Size(532, 640)
+    $body.BackColor = $themeBackground
+    $form.Controls.Add($body)
+
     $inputs = @{}
     $top = 14
-    $top = Add-FieldRow $form $inputs "Name for this server" "Name" $working.Name $top 20 $false
-    $top = Add-FieldRow $form $inputs "Place ID" "PlaceId" $working.PlaceId $top 20 $false
-    $top = Add-FieldRow $form $inputs "Private server link" "PrivateServerLink" $working.PrivateServerLink $top 20 $false
+    $top = Add-FieldRow $body $inputs "Name for this server" "Name" $working.Name $top 20 $false
+    $top = Add-FieldRow $body $inputs "Place ID" "PlaceId" $working.PlaceId $top 20 $false
+    $top = Add-FieldRow $body $inputs "Private server link" "PrivateServerLink" $working.PrivateServerLink $top 20 $false
 
     $mainCaption = if ($isFirst) { "Main username" } else { "Main username (optional)" }
-    $top = Add-FieldRow $form $inputs $mainCaption "MainAccount" $working.MainAccount $top 20 $false
+    $top = Add-FieldRow $body $inputs $mainCaption "MainAccount" $working.MainAccount $top 20 $false
     if (-not $isFirst)
     {
         $mainNote = New-Object System.Windows.Forms.Label
         $mainNote.Text = "Leave blank and every account here is treated as an alt."
         $mainNote.Location = New-Object System.Drawing.Point(220, ($top - 6))
-        $mainNote.Size = New-Object System.Drawing.Size(312, 30)                      # two lines of room: the text needs 304 px and 300 was not enough
+        $mainNote.Size = New-Object System.Drawing.Size(300, 32)                      # two lines: the text needs 304 px, so it wraps under the box
         $mainNote.ForeColor = $themeMuted
-        $form.Controls.Add($mainNote)
-        $top += 22
-
+        $body.Controls.Add($mainNote)
+        $top += 28                                                                    # clear of the note, which used to cover the top of the next box
     }
 
-    $top = Add-FieldRow $form $inputs "Alt usernames (one per line)" "AltAccounts" $working.AltAccounts $top 90 $false
-    $top = Add-FieldRow $form $inputs "Relog alts after minutes" "MaximumSessionMinutes" $working.MaximumSessionMinutes $top 20 $false
-    $top = Add-FieldRow $form $inputs "Frame rate cap (0=off)" "FramerateCap" $working.FramerateCap $top 20 $false
-    $top = Add-FieldRow $form $inputs "Kill an alt below free MB (0=off)" "MinimumFreeMegabytes" $working.MinimumFreeMegabytes $top 20 $false
-    $top = Add-FieldRow $form $inputs "Anti-idle every min (0=off)" "AntiIdleMinutes" $working.AntiIdleMinutes $top 20 $false
+    $top = Add-FieldRow $body $inputs "Alt usernames (one per line)" "AltAccounts" $working.AltAccounts $top 90 $false
+    $top = Add-FieldRow $body $inputs "Relog alts after minutes" "MaximumSessionMinutes" $working.MaximumSessionMinutes $top 20 $false
+    $top = Add-FieldRow $body $inputs "Frame rate cap (0=off)" "FramerateCap" $working.FramerateCap $top 20 $false
+    $top = Add-FieldRow $body $inputs "Kill an alt below free MB (0=off)" "MinimumFreeMegabytes" $working.MinimumFreeMegabytes $top 20 $false
+    $top = Add-FieldRow $body $inputs "Anti-idle every min (0=off)" "AntiIdleMinutes" $working.AntiIdleMinutes $top 20 $false
 
     # the key field is narrowed to leave room for its picker
-    $top = Add-FieldRow $form $inputs "Anti-idle key or spot" "AntiIdleKey" $working.AntiIdleKey $top 20 $false
+    $top = Add-FieldRow $body $inputs "Anti-idle key or spot" "AntiIdleKey" $working.AntiIdleKey $top 20 $false
     $antiIdleBox = $inputs["AntiIdleKey"]
     $antiIdleBox.Size = New-Object System.Drawing.Size(232, 20)
-    $pickKeyButton = New-Object System.Windows.Forms.Button
+    $pickKeyButton = New-Object RoundButton
     $pickKeyButton.Text = "Pick"
-    $pickKeyButton.Location = New-Object System.Drawing.Point(458, ($antiIdleBox.Location.Y - 1))
-    $pickKeyButton.Size = New-Object System.Drawing.Size(62, 23)
+    $pickKeyButton.Location = New-Object System.Drawing.Point(458, $antiIdleBox.Location.Y)
+    $pickKeyButton.Size = New-Object System.Drawing.Size(62, $antiIdleBox.Height)
     Set-ThemedButton $pickKeyButton $false
     $pickKeyButton.Add_Click({
         $pickKeyButton.Enabled = $false
@@ -1310,9 +1499,9 @@ function Show-ServerWindow($server, $index, $isFirst)
         }
         finally { $pickKeyButton.Enabled = $true }
     })
-    $form.Controls.Add($pickKeyButton)
+    $body.Controls.Add($pickKeyButton)
 
-    $top = Add-CheckRow $form $inputs "Aggressive anti-idle: walk and jump, ignores the key" "AggressiveAntiIdle" ("$($working.AggressiveAntiIdle)" -eq "True") $top
+    $top = Add-CheckRow $body $inputs "Aggressive anti-idle: walk and jump, ignores the key" "AggressiveAntiIdle" ("$($working.AggressiveAntiIdle)" -eq "True") $top
 
     # the step list, with the spot picker it already had
     $top += 4
@@ -1321,14 +1510,14 @@ function Show-ServerWindow($server, $index, $isFirst)
     $stepsLabel.Location = New-Object System.Drawing.Point(4, ($top + 3))
     $stepsLabel.Size = New-Object System.Drawing.Size(210, 20)
     $stepsLabel.ForeColor = $themeText
-    $form.Controls.Add($stepsLabel)
+    $body.Controls.Add($stepsLabel)
 
     $stepsHint = New-Object System.Windows.Forms.Label
     $stepsHint.Text = "key 2   hold w 4200" + [char]0x2003 + "scroll -6" + [char]0x2003 + "click 0.5,0.6   wait 7000"
     $stepsHint.Location = New-Object System.Drawing.Point(4, ($top + 24))
     $stepsHint.Size = New-Object System.Drawing.Size(210, 46)
     $stepsHint.ForeColor = $themeMuted
-    $form.Controls.Add($stepsHint)
+    $body.Controls.Add($stepsHint)
 
     $stepsBox = New-Object System.Windows.Forms.TextBox
     $stepsBox.Location = New-Object System.Drawing.Point(220, $top)
@@ -1340,13 +1529,13 @@ function Show-ServerWindow($server, $index, $isFirst)
     $stepsBox.BackColor = $themeSurface
     $stepsBox.ForeColor = $themeText
     $stepsBox.BorderStyle = "FixedSingle"
-    $form.Controls.Add($stepsBox)
+    $body.Controls.Add($stepsBox)
     $inputs["StepList"] = $stepsBox
 
-    $pickSpotButton = New-Object System.Windows.Forms.Button
+    $pickSpotButton = New-Object RoundButton
     $pickSpotButton.Text = "Pick"
-    $pickSpotButton.Location = New-Object System.Drawing.Point(458, ($top - 1))
-    $pickSpotButton.Size = New-Object System.Drawing.Size(62, 23)
+    $pickSpotButton.Location = New-Object System.Drawing.Point(458, $top)
+    $pickSpotButton.Size = New-Object System.Drawing.Size(62, $antiIdleBox.Height)
     Set-ThemedButton $pickSpotButton $false
     $pickSpotButton.Add_Click({
         $mainProcess = $null
@@ -1381,28 +1570,34 @@ function Show-ServerWindow($server, $index, $isFirst)
         if ($stepsBox.Text -and -not $stepsBox.Text.EndsWith("`n")) { $stepsBox.AppendText("`r`n") }
         $stepsBox.AppendText($picked)
     })
-    $form.Controls.Add($pickSpotButton)
+    $body.Controls.Add($pickSpotButton)
     $top += 100
 
-    $top = Add-CheckRow $form $inputs "Run the steps by itself when main rejoins" "RunStepsOnRejoin" ("$($working.RunStepsOnRejoin)" -eq "True") $top
+    $top = Add-CheckRow $body $inputs "Run the steps by itself when main rejoins" "RunStepsOnRejoin" ("$($working.RunStepsOnRejoin)" -eq "True") $top
 
-    $okButton = New-Object System.Windows.Forms.Button
-    $okButton.Text = "OK"
-    $okButton.Location = New-Object System.Drawing.Point(350, ($top + 10))
-    $okButton.Size = New-Object System.Drawing.Size(80, 28)
-    $okButton.DialogResult = "OK"
-    Set-ThemedButton $okButton $true
-    $form.Controls.Add($okButton)
-    $form.AcceptButton = $okButton
-
-    $cancelButton = New-Object System.Windows.Forms.Button
+    # OK on the right, where the eye ends up, matching Start in the main settings window
+    $cancelButton = New-Object RoundButton
     $cancelButton.Text = "Cancel"
-    $cancelButton.Location = New-Object System.Drawing.Point(440, ($top + 10))
-    $cancelButton.Size = New-Object System.Drawing.Size(80, 28)
+    $cancelButton.Location = New-Object System.Drawing.Point(332, ($top + 10))
+    $cancelButton.Size = New-Object System.Drawing.Size(90, 30)
     $cancelButton.DialogResult = "Cancel"
     Set-ThemedButton $cancelButton $false
-    $form.Controls.Add($cancelButton)
+    $body.Controls.Add($cancelButton)
     $form.CancelButton = $cancelButton
+
+    $okButton = New-Object RoundButton
+    $okButton.Text = "OK"
+    $okButton.Location = New-Object System.Drawing.Point(430, ($top + 10))
+    $okButton.Size = New-Object System.Drawing.Size(90, 30)
+    $okButton.DialogResult = "OK"
+    Set-ThemedButton $okButton $true
+    $body.Controls.Add($okButton)
+    $form.AcceptButton = $okButton
+
+    # Exactly as tall as what is in it, which differs between the first server and the rest
+    $bodyHeight = $top + 10 + 30 + 16
+    $body.Height = $bodyHeight
+    $form.ClientSize = New-Object System.Drawing.Size(564, $bodyHeight)
 
     if ($form.ShowDialog() -ne "OK") { $form.Dispose(); return $null }
 
@@ -1428,13 +1623,13 @@ function Show-SettingsWindow($saved)
 
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Roblox Watchdog"
-    $form.Size = New-Object System.Drawing.Size(580, 520)
+    $form.ClientSize = New-Object System.Drawing.Size(564, 484)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedSingle"
     $form.MaximizeBox = $false
     Set-ThemedForm $form
 
-    $pages = Add-TabbedPages $form @("Servers", "Account Manager", "Windows", "Alerts", "Housekeeping") 10 10 546 410
+    $pages = Add-TabbedPages $form @("Servers", "Account Manager", "Windows", "Alerts", "Housekeeping") 16 12 532 410
 
     $inputs = @{}
 
@@ -1487,30 +1682,30 @@ function Show-SettingsWindow($saved)
     }
     & $refreshServers
 
-    $addServerButton = New-Object System.Windows.Forms.Button
+    $addServerButton = New-Object RoundButton
     $addServerButton.Text = "Add server"
     $addServerButton.Location = New-Object System.Drawing.Point(4, 306)
-    $addServerButton.Size = New-Object System.Drawing.Size(110, 27)
+    $addServerButton.Size = New-Object System.Drawing.Size(110, 28)
     Set-ThemedButton $addServerButton $false
     $serversPage.Controls.Add($addServerButton)
 
-    $editServerButton = New-Object System.Windows.Forms.Button
+    $editServerButton = New-Object RoundButton
     $editServerButton.Text = "Edit"
-    $editServerButton.Location = New-Object System.Drawing.Point(120, 306)
-    $editServerButton.Size = New-Object System.Drawing.Size(90, 27)
+    $editServerButton.Location = New-Object System.Drawing.Point(122, 306)
+    $editServerButton.Size = New-Object System.Drawing.Size(90, 28)
     Set-ThemedButton $editServerButton $false
     $serversPage.Controls.Add($editServerButton)
 
-    $removeServerButton = New-Object System.Windows.Forms.Button
+    $removeServerButton = New-Object RoundButton
     $removeServerButton.Text = "Remove"
-    $removeServerButton.Location = New-Object System.Drawing.Point(216, 306)
-    $removeServerButton.Size = New-Object System.Drawing.Size(90, 27)
+    $removeServerButton.Location = New-Object System.Drawing.Point(220, 306)
+    $removeServerButton.Size = New-Object System.Drawing.Size(90, 28)
     Set-ThemedButton $removeServerButton $false
     $serversPage.Controls.Add($removeServerButton)
 
     $serversNote = New-Object System.Windows.Forms.Label
     $serversNote.Text = "Each server has its own link, accounts, step list, relog timer, anti-idle and limits."
-    $serversNote.Location = New-Object System.Drawing.Point(4, 340)
+    $serversNote.Location = New-Object System.Drawing.Point(4, 344)
     $serversNote.Size = New-Object System.Drawing.Size(516, 32)
     $serversNote.ForeColor = $themeMuted
     $serversPage.Controls.Add($serversNote)
@@ -1600,10 +1795,10 @@ function Show-SettingsWindow($saved)
     $webhookBox = $inputs["DiscordWebhookUrl"]
     $webhookBox.Size = New-Object System.Drawing.Size(232, 20)
 
-    $testButton = New-Object System.Windows.Forms.Button
+    $testButton = New-Object RoundButton
     $testButton.Text = "Test"
-    $testButton.Location = New-Object System.Drawing.Point(458, ($webhookBox.Location.Y - 1))
-    $testButton.Size = New-Object System.Drawing.Size(62, 23)
+    $testButton.Location = New-Object System.Drawing.Point(458, $webhookBox.Location.Y)
+    $testButton.Size = New-Object System.Drawing.Size(62, $webhookBox.Height)
     Set-ThemedButton $testButton $false
     $testButton.Add_Click({
         $url = $webhookBox.Text.Trim()
@@ -1666,19 +1861,19 @@ function Show-SettingsWindow($saved)
     $housePage.Controls.Add($houseNote)
 
     # ---- Start and cancel, outside the pages -----------------------------------
-    $startButton = New-Object System.Windows.Forms.Button
+    $startButton = New-Object RoundButton
     $startButton.Text = "Start"
-    $startButton.Location = New-Object System.Drawing.Point(456, 432)
-    $startButton.Size = New-Object System.Drawing.Size(100, 30)
+    $startButton.Location = New-Object System.Drawing.Point(436, 436)
+    $startButton.Size = New-Object System.Drawing.Size(100, 32)
     $startButton.DialogResult = "OK"
     Set-ThemedButton $startButton $true
     $form.Controls.Add($startButton)
     $form.AcceptButton = $startButton
 
-    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton = New-Object RoundButton
     $cancelButton.Text = "Cancel"
-    $cancelButton.Location = New-Object System.Drawing.Point(348, 432)
-    $cancelButton.Size = New-Object System.Drawing.Size(100, 30)
+    $cancelButton.Location = New-Object System.Drawing.Point(328, 436)
+    $cancelButton.Size = New-Object System.Drawing.Size(100, 32)
     $cancelButton.DialogResult = "Cancel"
     Set-ThemedButton $cancelButton $false
     $form.Controls.Add($cancelButton)
@@ -3531,7 +3726,8 @@ elseif ($closeOtherClients)
 
 $statusForm = New-Object System.Windows.Forms.Form
 $statusForm.Text = "Roblox Watchdog"
-$statusForm.Size = New-Object System.Drawing.Size(580, 648)                           # grown for the Add server row
+# Laid out on a 16 pixel gutter: content runs from x 16 to 548 in a 564 wide client area
+$statusForm.ClientSize = New-Object System.Drawing.Size(564, 560)
 $statusForm.StartPosition = "CenterScreen"
 $statusForm.FormBorderStyle = "FixedSingle"
 $statusForm.MaximizeBox = $false
@@ -3541,19 +3737,19 @@ Set-ThemedForm $statusForm
 # answer to "is this elevated" is on screen instead of buried in the log
 $elevationStrip = New-Object System.Windows.Forms.Label
 $elevationStrip.Location = New-Object System.Drawing.Point(0, 0)
-$elevationStrip.Size = New-Object System.Drawing.Size(564, 44)
+$elevationStrip.Size = New-Object System.Drawing.Size(564, 54)                         # three lines: the non-admin text wraps to two, the update notice adds one
 $elevationStrip.TextAlign = "MiddleLeft"
-$elevationStrip.Padding = New-Object System.Windows.Forms.Padding(14, 0, 14, 0)
+$elevationStrip.Padding = New-Object System.Windows.Forms.Padding(16, 0, 16, 0)
 if ($isElevated)
 {
     $elevationStrip.Text = "Running as administrator"
-    $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(22, 40, 34)           # green tinted, mixed against the new background
+    $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(22, 38, 36)           # green tinted, mixed against the purple background
     $elevationStrip.ForeColor = $themeGreen
 }
 else
 {
     $elevationStrip.Text = "Not running as administrator. If Account Manager is elevated, tiling, anti-idle and closing strays will be denied."
-    $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(48, 36, 18)           # amber tinted
+    $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(46, 35, 26)           # amber tinted
     $elevationStrip.ForeColor = $themeAmber
 }
 # Kept, because the update notice is added as a second line on this same strip rather
@@ -3567,8 +3763,8 @@ $elevationStrip.Add_Click({
 $statusForm.Controls.Add($elevationStrip)
 
 $headline = New-Object System.Windows.Forms.Label
-$headline.Location = New-Object System.Drawing.Point(14, 58)
-$headline.Size = New-Object System.Drawing.Size(536, 40)
+$headline.Location = New-Object System.Drawing.Point(16, 66)
+$headline.Size = New-Object System.Drawing.Size(532, 40)
 $headline.Font = New-Object System.Drawing.Font("Segoe UI Light", 22)
 $headline.TextAlign = "MiddleCenter"
 $headline.ForeColor = $themeText
@@ -3579,14 +3775,14 @@ function New-Tile($caption, $x, $y)
 {
     $captionLabel = New-Object System.Windows.Forms.Label
     $captionLabel.Location = New-Object System.Drawing.Point($x, $y)
-    $captionLabel.Size = New-Object System.Drawing.Size(250, 16)
+    $captionLabel.Size = New-Object System.Drawing.Size(232, 16)
     $captionLabel.ForeColor = $themeMuted
     $captionLabel.Text = $caption
     $statusForm.Controls.Add($captionLabel)
 
     $valueLabel = New-Object System.Windows.Forms.Label
     $valueLabel.Location = New-Object System.Drawing.Point($x, ($y + 17))
-    $valueLabel.Size = New-Object System.Drawing.Size(250, 25)
+    $valueLabel.Size = New-Object System.Drawing.Size(232, 25)
     $valueLabel.Font = New-Object System.Drawing.Font("Segoe UI", 12)
     $valueLabel.ForeColor = $themeAccent
     $valueLabel.Text = "-"
@@ -3594,34 +3790,39 @@ function New-Tile($caption, $x, $y)
     return $valueLabel
 }
 
-$tileFreeRam  = New-Tile "free memory"     28 108
-$tileStrays   = New-Tile "strays closed"   300 108
-$tileUptime   = New-Tile "watchdog uptime" 28 156
-$tileLastDrop = New-Tile "last disconnect" 300 156
+$tileFreeRam  = New-Tile "free memory"     32 116
+$tileStrays   = New-Tile "strays closed"   300 116
+$tileUptime   = New-Tile "watchdog uptime" 32 164
+$tileLastDrop = New-Tile "last disconnect" 300 164
 
 $divider = New-Object System.Windows.Forms.Panel
-$divider.Location = New-Object System.Drawing.Point(14, 198)
-$divider.Size = New-Object System.Drawing.Size(536, 1)
+$divider.Location = New-Object System.Drawing.Point(16, 210)
+$divider.Size = New-Object System.Drawing.Size(532, 1)
 $divider.BackColor = $themeBorder
 $statusForm.Controls.Add($divider)
 
 # The real ListView header cannot be themed and would sit there light grey on a dark
-# list, so it is switched off and these labels stand in for it, lined up with the
-# column widths below
-$headerOffsets = @{ Account = 42; Status = 192; Memory = 332; Up = 406; Drops = 482 }
-foreach ($headerName in @("Account", "Status", "Memory", "Up", "Drops"))
+# list, so it is switched off and these labels stand in for it. Each is exactly as wide
+# as its column: they were all 120 wide, and Memory's background painted over "Up".
+$listColumns = @(@("", 28), @("Account", 150), @("Status", 140), @("Memory", 74), @("Up", 76), @("Drops", 64))
+$headerLeft = 16
+foreach ($column in $listColumns)
 {
-    $headerLabel = New-Object System.Windows.Forms.Label
-    $headerLabel.Text = $headerName
-    $headerLabel.Location = New-Object System.Drawing.Point($headerOffsets[$headerName], 208)
-    $headerLabel.Size = New-Object System.Drawing.Size(120, 16)
-    $headerLabel.ForeColor = $themeMuted
-    $statusForm.Controls.Add($headerLabel)
+    if ($column[0])
+    {
+        $headerLabel = New-Object System.Windows.Forms.Label
+        $headerLabel.Text = $column[0]
+        $headerLabel.Location = New-Object System.Drawing.Point(($headerLeft + 3), 220)  # 3 in, where the rows draw their text
+        $headerLabel.Size = New-Object System.Drawing.Size(($column[1] - 3), 16)
+        $headerLabel.ForeColor = $themeMuted
+        $statusForm.Controls.Add($headerLabel)
+    }
+    $headerLeft += $column[1]
 }
 
 $accountList = New-Object System.Windows.Forms.ListView
-$accountList.Location = New-Object System.Drawing.Point(14, 228)
-$accountList.Size = New-Object System.Drawing.Size(536, 166)
+$accountList.Location = New-Object System.Drawing.Point(16, 240)
+$accountList.Size = New-Object System.Drawing.Size(532, 166)
 $accountList.View = "Details"
 $accountList.FullRowSelect = $true
 $accountList.GridLines = $false
@@ -3630,12 +3831,34 @@ $accountList.MultiSelect = $true                                                
 $accountList.BorderStyle = "None"
 $accountList.BackColor = $themeSurface
 $accountList.ForeColor = $themeText
-$accountList.Columns.Add("", 28) | Out-Null
-$accountList.Columns.Add("Account", 150) | Out-Null
-$accountList.Columns.Add("Status", 140) | Out-Null
-$accountList.Columns.Add("Memory", 74) | Out-Null
-$accountList.Columns.Add("Up", 76) | Out-Null
-$accountList.Columns.Add("Drops", 68) | Out-Null                                      # fills the rest, so no empty sliver column
+foreach ($column in $listColumns) { $accountList.Columns.Add($column[0], $column[1]) | Out-Null }  # adds up to the list width, so no empty sliver column
+
+# Drawn by hand for the same reason as the server list in the settings: the selected row
+# would otherwise be a band of Windows blue. A bar down the left marks it instead, and
+# each cell keeps its own colour, which is what makes the dot and the status readable.
+$accountList.OwnerDraw = $true
+$accountList.Add_DrawItem({ param($drawn, $event) })                                  # everything happens per cell below
+$accountList.Add_DrawSubItem({
+    param($drawn, $event)
+    $isSelected = $event.Item.Selected
+    $bounds = $event.Bounds
+    $faceBrush = New-Object System.Drawing.SolidBrush($(if ($isSelected) { $themeRaised } else { $themeSurface }))
+    $event.Graphics.FillRectangle($faceBrush, $bounds)
+    $faceBrush.Dispose()
+    if ($isSelected -and $event.ColumnIndex -eq 0)
+    {
+        $barBrush = New-Object System.Drawing.SolidBrush($themeAccent)
+        $event.Graphics.FillRectangle($barBrush, $bounds.Left, $bounds.Top, 3, $bounds.Height)
+        $barBrush.Dispose()
+    }
+    $textBounds = New-Object System.Drawing.Rectangle(($bounds.Left + 3), $bounds.Top, ($bounds.Width - 6), $bounds.Height)
+    [System.Windows.Forms.TextRenderer]::DrawText($event.Graphics, $event.SubItem.Text, $drawn.Font, $textBounds,
+        $event.SubItem.ForeColor,
+        ([System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::SingleLine -bor
+         [System.Windows.Forms.TextFormatFlags]::EndEllipsis -bor [System.Windows.Forms.TextFormatFlags]::NoPrefix))
+})
+# A row that loses its selection is not always repainted by the ListView itself
+$accountList.Add_SelectedIndexChanged({ $this.Invalidate() })
 foreach ($accountName in $allAccounts)
 {
     $item = New-Object System.Windows.Forms.ListViewItem("")
@@ -3653,39 +3876,42 @@ $statusForm.Controls.Add($accountList)
 # One line of detail for whatever is selected, so the numbers behind a row are readable
 # without cramming more columns in
 $detailLabel = New-Object System.Windows.Forms.Label
-$detailLabel.Location = New-Object System.Drawing.Point(14, 400)
-$detailLabel.Size = New-Object System.Drawing.Size(536, 18)
+$detailLabel.Location = New-Object System.Drawing.Point(16, 414)
+$detailLabel.Size = New-Object System.Drawing.Size(532, 18)
+$detailLabel.AutoEllipsis = $true                                                     # a long detail ends in ... instead of mid-word
 $detailLabel.ForeColor = $themeMuted
 $detailLabel.Text = ""
 $statusForm.Controls.Add($detailLabel)
 
-$relaunchButton = New-Object System.Windows.Forms.Button
+# Two rows of buttons, both spanning the full content width with 8 pixel gaps: what to do
+# with the selected accounts, then the watchdog itself
+$relaunchButton = New-Object RoundButton
 $relaunchButton.Text = "Relaunch selected"
-$relaunchButton.Location = New-Object System.Drawing.Point(14, 424)
-$relaunchButton.Size = New-Object System.Drawing.Size(140, 27)
+$relaunchButton.Location = New-Object System.Drawing.Point(16, 442)
+$relaunchButton.Size = New-Object System.Drawing.Size(150, 30)
 $relaunchButton.Enabled = $false
 Set-ThemedButton $relaunchButton $false
 $statusForm.Controls.Add($relaunchButton)
 
-$pauseAccountButton = New-Object System.Windows.Forms.Button
+$pauseAccountButton = New-Object RoundButton
 $pauseAccountButton.Text = "Pause selected"
-$pauseAccountButton.Location = New-Object System.Drawing.Point(162, 424)
-$pauseAccountButton.Size = New-Object System.Drawing.Size(140, 27)
+$pauseAccountButton.Location = New-Object System.Drawing.Point(174, 442)
+$pauseAccountButton.Size = New-Object System.Drawing.Size(150, 30)
 $pauseAccountButton.Enabled = $false
 Set-ThemedButton $pauseAccountButton $false
 $statusForm.Controls.Add($pauseAccountButton)
 
-$saveLayoutButton = New-Object System.Windows.Forms.Button
+$saveLayoutButton = New-Object RoundButton
 $saveLayoutButton.Text = "Save layout"
-$saveLayoutButton.Location = New-Object System.Drawing.Point(310, 424)
-$saveLayoutButton.Size = New-Object System.Drawing.Size(120, 27)
+$saveLayoutButton.Location = New-Object System.Drawing.Point(332, 442)
+$saveLayoutButton.Size = New-Object System.Drawing.Size(104, 30)
 Set-ThemedButton $saveLayoutButton $false
 $statusForm.Controls.Add($saveLayoutButton)
 
-$loadLayoutButton = New-Object System.Windows.Forms.Button
+$loadLayoutButton = New-Object RoundButton
 $loadLayoutButton.Text = "Load layout"
-$loadLayoutButton.Location = New-Object System.Drawing.Point(436, 424)
-$loadLayoutButton.Size = New-Object System.Drawing.Size(120, 27)
+$loadLayoutButton.Location = New-Object System.Drawing.Point(444, 442)
+$loadLayoutButton.Size = New-Object System.Drawing.Size(104, 30)
 Set-ThemedButton $loadLayoutButton $false
 $statusForm.Controls.Add($loadLayoutButton)
 
@@ -3699,32 +3925,32 @@ $loadLayoutButton.Add_Click({
     if ($moved) { $headline.Text = "put $moved window$(if ($moved -ne 1) { 's' }) back" }
 })
 
-$settingsButton = New-Object System.Windows.Forms.Button
+$settingsButton = New-Object RoundButton
 $settingsButton.Text = "Settings"
-$settingsButton.Location = New-Object System.Drawing.Point(14, 468)
-$settingsButton.Size = New-Object System.Drawing.Size(100, 30)
+$settingsButton.Location = New-Object System.Drawing.Point(16, 482)
+$settingsButton.Size = New-Object System.Drawing.Size(82, 30)
 Set-ThemedButton $settingsButton $false
 $statusForm.Controls.Add($settingsButton)
 
-$pauseButton = New-Object System.Windows.Forms.Button
+$pauseButton = New-Object RoundButton
 $pauseButton.Text = "Pause"
-$pauseButton.Location = New-Object System.Drawing.Point(122, 468)
-$pauseButton.Size = New-Object System.Drawing.Size(100, 30)
+$pauseButton.Location = New-Object System.Drawing.Point(106, 482)
+$pauseButton.Size = New-Object System.Drawing.Size(82, 30)
 Set-ThemedButton $pauseButton $false
 $statusForm.Controls.Add($pauseButton)
 
-$logButton = New-Object System.Windows.Forms.Button
+$logButton = New-Object RoundButton
 $logButton.Text = "Log"
-$logButton.Location = New-Object System.Drawing.Point(230, 468)
-$logButton.Size = New-Object System.Drawing.Size(100, 30)
+$logButton.Location = New-Object System.Drawing.Point(196, 482)
+$logButton.Size = New-Object System.Drawing.Size(82, 30)
 Set-ThemedButton $logButton $false
 $statusForm.Controls.Add($logButton)
 
 # Runs the step list on main. Enabled only when there is a list and main is in the game.
-$runStepsButton = New-Object System.Windows.Forms.Button
+$runStepsButton = New-Object RoundButton
 $runStepsButton.Text = "Run"
-$runStepsButton.Location = New-Object System.Drawing.Point(338, 468)
-$runStepsButton.Size = New-Object System.Drawing.Size(100, 30)
+$runStepsButton.Location = New-Object System.Drawing.Point(286, 482)
+$runStepsButton.Size = New-Object System.Drawing.Size(82, 30)
 $runStepsButton.Enabled = $false
 Set-ThemedButton $runStepsButton $false
 $statusForm.Controls.Add($runStepsButton)
@@ -3736,10 +3962,10 @@ $runStepsButton.Add_Click({
     Start-StepRun $ready "you pressed Run"
 })
 
-$addServerButton = New-Object System.Windows.Forms.Button
+$addServerButton = New-Object RoundButton
 $addServerButton.Text = "Add server"
-$addServerButton.Location = New-Object System.Drawing.Point(14, 505)
-$addServerButton.Size = New-Object System.Drawing.Size(120, 27)
+$addServerButton.Location = New-Object System.Drawing.Point(376, 482)
+$addServerButton.Size = New-Object System.Drawing.Size(82, 30)
 Set-ThemedButton $addServerButton $false
 $statusForm.Controls.Add($addServerButton)
 
@@ -3781,16 +4007,16 @@ $addServerButton.Add_Click({
     $headline.Text = "added $($added.Name), starting $($changes.Added.Count) account$(if ($changes.Added.Count -ne 1) { 's' })"
 })
 
-$exitButton = New-Object System.Windows.Forms.Button
+$exitButton = New-Object RoundButton
 $exitButton.Text = "Exit"
-$exitButton.Location = New-Object System.Drawing.Point(450, 468)
-$exitButton.Size = New-Object System.Drawing.Size(100, 30)
+$exitButton.Location = New-Object System.Drawing.Point(466, 482)
+$exitButton.Size = New-Object System.Drawing.Size(82, 30)
 Set-ThemedButton $exitButton $false
 $statusForm.Controls.Add($exitButton)
 
 $hintLabel = New-Object System.Windows.Forms.Label
-$hintLabel.Location = New-Object System.Drawing.Point(14, 546)                         # below Add server, which sits at 505
-$hintLabel.Size = New-Object System.Drawing.Size(536, 18)
+$hintLabel.Location = New-Object System.Drawing.Point(16, 528)
+$hintLabel.Size = New-Object System.Drawing.Size(532, 18)
 $hintLabel.ForeColor = $themeMuted
 $hintLabel.Text = "Closing this window keeps the watchdog running in the tray. Use Exit to stop it."
 $statusForm.Controls.Add($hintLabel)
@@ -3798,7 +4024,7 @@ $statusForm.Controls.Add($hintLabel)
 # ---- Tray -------------------------------------------------------------------------
 
 $trayIcon = New-Object System.Windows.Forms.NotifyIcon
-$trayIcon.Icon = [System.Drawing.SystemIcons]::Application
+$trayIcon.Icon = $appIcons.Small
 $trayIcon.Text = "Roblox Watchdog"
 $trayIcon.Visible = $true
 
@@ -4178,8 +4404,8 @@ function Update-StatusUi
         {
             $elevationStrip.Text = ($elevationStripText + [char]0x000A +
                                     "Version $shownVersion is out and this is $(Get-OwnVersion). Click here to download it.")
-            $elevationStrip.BackColor = [System.Drawing.Color]::FromArgb(44, 26, 48)   # accent tinted, for the update notice
-            $elevationStrip.ForeColor = $themeAccent
+            $elevationStrip.BackColor = $themeAccentSoft                                # violet tinted, for the update notice
+            $elevationStrip.ForeColor = $themeAccentHover
             $elevationStrip.Cursor = [System.Windows.Forms.Cursors]::Hand
         }
         else
