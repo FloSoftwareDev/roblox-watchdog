@@ -9,138 +9,7 @@
 # Project              : Miniwar AFK
 # Datum                : 18-09-2026
 #------------------------------------------------------------------------------------#
-# Aanpassing   Datum   Project Pgmr   Omschrijving
-# 001          19-09-2026 Miniwar AFK FG  Password verplicht, fallback zonder LinkCode verwijderd, RAM-antwoord loggen, nieuw venster is de succescontrole, volledige private server link via JobId
-# 002          21-09-2026 Miniwar AFK FG  Disconnect-detectie via Roblox-logbestanden, main wordt ook herstart en getegeld (slot 0)
-# 003          22-09-2026 Miniwar AFK FG  Security: instellingen naar LOCALAPPDATA, wachtwoord versleuteld (DPAPI),
-#                                         bestandsrechten dichtgezet, private-serverlink gevalideerd, PID-hergebruik afgevangen.
-#                                         Robuustheid: fouten in de lus niet meer fataal, backoff na mislukte launches,
-#                                         HTTP-timeout, logbestand, afgekapt logbestand afgevangen.
-# 004          23-09-2026 Miniwar AFK FG  Framerate-cap tegen CPU-verbruik, anti-idle: venster naar voren en toetsaanslag
-#                                         zodat Roblox de client na 20 minuten niet kickt.
-# 005          25-09-2026 Miniwar AFK FG  Een client die wel start maar nooit in de game komt wordt herstart (er is geen
-#                                         disconnectcode bij "failed to connect"), zwerfprocessen zonder venster worden
-#                                         opgeruimd, fatale fouten gaan naar het logbestand in plaats van alleen de console.
-# 006          26-09-2026 Miniwar AFK FG  Statusvenster in plaats van een console: de lus is nu een state machine die per
-#                                         tick een stap zet, zodat het venster niet vastloopt tijdens een launch. Tray-icoon,
-#                                         pauzeknop, accounts los herstarten en een zichtbare melding als rechten ontbreken.
-#                                         De accounts worden nu naar schermoppervlak over alle monitoren verdeeld.
-# 007          04-10-2026 Miniwar AFK FG  RAM weigert een launch met een tekst in het antwoord in plaats van met een
-#                                         statuscode. Die tekst werd weggegooid, waardoor een geweigerde launch 90
-#                                         seconden op een venster wachtte dat nooit kwam en daarna eindeloos opnieuw
-#                                         probeerde zonder uitleg. Nu stopt de launch direct met de melding van RAM
-#                                         erbij, en het statusvenster laat de laatste foutmelding per account zien.
-# 008          04-10-2026 Miniwar AFK FG  Het spel teleporteert spelers tussen rondes: de client verlaat de server, logt
-#                                         een disconnect en komt vijf seconden later op diezelfde server terug, in
-#                                         hetzelfde proces. Dat werd als een drop gelezen en de gezonde client werd
-#                                         gesloten en opnieuw gestart: 728 van de 785 disconnects in het logbestand.
-#                                         Nu wordt gewacht of de client zelf terugkomt op dezelfde server, en wordt
-#                                         alleen herstart als dat niet gebeurt. Een verdwenen proces is ook geen bewijs
-#                                         meer: een warm gestarte sessie wordt overgenomen in plaats van herstart, en
-#                                         anders wel geteld en gemeld. Een sessie zonder logbestand zoekt nu door tot
-#                                         hij er een heeft, want zonder logbestand ziet de watchdog niets.
-# 009          04-10-2026 Miniwar AFK FG  Roblox weigert soms een tweede client te starten door in zijn eigen
-#                                         SingleInstanceGuard te crashen: de nieuwe starter kan het venster van de
-#                                         draaiende client niet bereiken en stopt voordat er een venster is. RAM meldt
-#                                         niets, want RAM heeft zijn deel gedaan. Dat werd 90 seconden afgewacht en
-#                                         daarna eindeloos opnieuw geprobeerd, terwijl opnieuw proberen niets oplost.
-#                                         Nu wordt de crash in het logbestand van de mislukte start herkend en worden
-#                                         alle clients gesloten, main inbegrepen, want dat is het enige dat het
-#                                         oplost. Daarna starten ze allemaal opnieuw, met hoogstens een reset per
-#                                         tien minuten zodat het niet gaat stuiteren.
-# 010          05-10-2026 Miniwar AFK FG  De private server verhuist af en toe naar een nieuwe instance en neemt alle
-#                                         accounts mee. Dat werd gelezen als zes losse drops en alles werd opnieuw
-#                                         gestart, terwijl er niets aan de hand was. Nu wordt een nieuw adres pas
-#                                         beoordeeld aan het eind van de ronde: komen meerdere accounts op hetzelfde
-#                                         nieuwe adres uit, dan is het een verhuizing en blijft alles staan. Staat een
-#                                         account alleen op een adres waar niemand anders zit, dan is het wel weg.
-#                                         Anti-idle: focus werd 22% van de keren geweigerd en dat kostte telkens een
-#                                         minuut; er wordt nu meteen opnieuw om gevraagd. Daarnaast een instelling
-#                                         voor agressieve anti-idle: dubbel zo vaak, met lopen, muisbeweging en twee
-#                                         toetsaanslagen in plaats van een.
-#                                         Een teleport laat het personage opnieuw spawnen, dus de setup is daarna
-#                                         net zo goed nodig als na een herstart. Dat werd gemist sinds teleports
-#                                         niet meer tot een herstart leiden, waardoor main bij spawn bleef staan
-#                                         zonder raketten en zonder melding.
-#                                         De watchdog kijkt nu ook of er een nieuwere versie uit is en zegt dat op
-#                                         de strook bovenin, aanklikbaar naar de downloadpagina. Eens per zes uur,
-#                                         op de achtergrond, en als het mislukt gebeurt er gewoon niets.
-# 011          05-10-2026 Miniwar AFK FG  Roblox schrijft de rejoin en de disconnect vanuit verschillende threads, dus
-#                                         de volgorde is niet zeker. Bij een teleport van zes accounts stond bij een
-#                                         van hen de rejoin 20 ms voor de disconnect, en omdat er alleen erna werd
-#                                         gekeken werd die client wel gesloten en herstart. De teleportmelding van
-#                                         het spel zelf beslist het nu, die staat er bij een echte drop nooit.
-#                                         Verder: de waarschuwing dat focus geweigerd wordt komt nog een keer in
-#                                         plaats van elke minuut per account.
-#                                         Een teleport is in de praktijk een relog: het personage spawnt opnieuw en
-#                                         de inventaris staat weer in de hotbar, dus alles wat met de hand is
-#                                         neergezet moet opnieuw. Dat wordt nu zo genoemd en gemeld, voor main altijd
-#                                         en voor een groep van drie of meer tegelijk. De melding dat de setup weer
-#                                         nodig is hing eerst aan het hebben van een stappenlijst, waardoor wie het
-#                                         met de hand doet niets te horen kreeg.
-# 012          06-10-2026 Miniwar AFK FG  Roblox kan een join weigeren met 403 en challengedByGcs, waarna de client de
-#                                         vasthoudcontrole laat zien. Dat zag eruit als vastlopen op een foutmelding,
-#                                         dus werd de client na 150 seconden gesloten en opnieuw gestart: drie keer in
-#                                         zeven minuten op 05-10, en elke poging vraagt Roblox opnieuw. Nu wordt het
-#                                         venster met rust gelaten tot iemand de controle doet, met een melding erbij,
-#                                         en daarna gaat het account gewoon verder.
-# 013          06-10-2026 Miniwar AFK FG  Pauze stopte het herstarten maar niet het kijken: er werd nog gelezen, nog
-#                                         besloten dat een account van server was gewisseld, en nog een client
-#                                         gesloten om een disconnect die daarna niet herstart kon worden. Pauze doet
-#                                         nu niets meer, en bij hervatten wordt wat de logbestanden in de tussentijd
-#                                         kregen overgeslagen. Verder een instelling om de al openstaande Roblox
-#                                         vensters over te nemen in plaats van ze te sluiten en opnieuw te starten:
-#                                         de oudste wordt main en de rest alts op volgorde van starten, elk met het
-#                                         eigen logbestand dat via de starttijd van het proces wordt gevonden.
-#                                         Sluiten en overnemen zijn tegenpolen, dus in het instellingenvenster kan er
-#                                         maar een van de twee aan staan: de ander gaat uit zodra je er een aanzet.
-# 014          06-10-2026 Miniwar AFK FG  Vensterposities onthouden werkte voor veel mensen niet. Drie oorzaken: de
-#                                         grootte werd nooit vergeleken, dus alleen slepen werd gezien en niet het
-#                                         veranderen van de grootte; er was 60 pixels nodig voordat slepen meetelde;
-#                                         en als het verplaatsen werd geweigerd, wat gebeurt als de clients als
-#                                         administrator draaien en de watchdog niet, bleef er niets om tegen te
-#                                         vergelijken en deed de hele functie niets. Nu wordt de echt gemeten
-#                                         rechthoek bewaard, ook na een geweigerde verplaatsing. Daarnaast twee
-#                                         knoppen om de hele indeling met groottes op te slaan en terug te zetten.
-# 015          06-10-2026 Miniwar AFK FG  Anti-idle nam alleen Space of een losse letter. Nu elke letter, cijfer of
-#                                         benoemde toets die de stappenlijst ook kent, of een plek in het venster om
-#                                         op te klikken, met een Pick knop die de toets of de plek voor je opschrijft.
-#                                         Ook opgelost: de muisbeweging in de agressieve stand las Left en Top van een
-#                                         rechthoek die X en Y heet, dus de cursor werd sinds 1.6.0 naar 0,0 gezet in
-#                                         plaats van naar het midden van het venster.
-# 016          06-10-2026 Miniwar AFK FG  Space koos in de picker niets: Space en Enter activeren de knop die focus
-#                                         heeft, en dat was de Pick knop zelf, dus de vraag werd geantwoord en de
-#                                         knop opnieuw ingedrukt. Knop staat nu uit tijdens het kiezen. Verder kan
-#                                         er nu ctrl, alt of shift bij gehouden worden, en bij het starten gaat er
-#                                         geen Discord bericht meer uit tenzij het na een crash zelf terugkwam.
-# 017          06-10-2026 Miniwar AFK FG  Agressieve anti-idle negeert nu de ingestelde toets of plek en loopt en
-#                                         springt in plaats daarvan. Een personage dat beweegt en springt is
-#                                         moeilijker te verwarren met iemand die stilzit dan een losse toets.
-# 018          07-10-2026 Miniwar AFK FG  Meerdere servers. Elke server heeft zijn eigen link, place, accounts,
-#                                         stappenlijst, relogtijd, anti-idle en limieten; main is per server en op de
-#                                         extra servers optioneel. Het instellingenvenster is opnieuw opgezet met
-#                                         tabbladen (Servers, Account Manager, Windows, Alerts, Housekeeping) in
-#                                         plaats van een lange kolom. Een server kan er tijdens het draaien bij, met
-#                                         de knop Add server: lopende accounts houden hun sessie en venster, nieuwe
-#                                         komen er achteraan bij en starten op hun beurt.
-# 019          07-10-2026 Miniwar AFK FG  Nieuw kleurenpalet: donker paars met magenta als accent en oranje voor een
-#                                         main. De tabbladen zijn geen TabControl meer maar eigen knoppen: Windows
-#                                         tekent tabkoppen zelf en negeert BackColor, en ook met OwnerDrawFixed blijft
-#                                         de strook eromheen wit. De serverlijst tekent zijn eigen regels, want een
-#                                         ListBox gebruikt anders het blauw van Windows. Add server stond bovenop de
-#                                         melding over de tray; het venster is 48 pixels hoger.
-# 020          08-10-2026 Miniwar AFK FG  Kleurenpalet bijgewerkt: diep donkerpaars met zacht violet als accent in
-#                                         plaats van magenta, en goud voor een main. Knoppen en vinkjes zijn afgerond en tekenen zichzelf
-#                                         (RoundButton, RoundCheckBox: een platte CheckBox negeert CheckedBackColor),
-#                                         de tabbladen zijn pillen in plaats van knoppen met een streep eronder, en
-#                                         de geselecteerde accountregel is niet meer Windows-blauw. Overlappingen
-#                                         opgelost: de kolomkoppen waren 120 breed en Memory dekte Up af, de notitie
-#                                         bij een optionele main lag over het vak eronder, en de strook bovenin had
-#                                         geen ruimte voor een derde regel. Alle vensters hebben nu 16 pixels marge
-#                                         en gelijke tussenruimtes; Add server staat in de onderste knoppenrij.
-#                                         Eigen icoon (RobloxWatchdog.ico, een violet oog) voor de exe, de vensters
-#                                         en de tray, in plaats van het lege standaardicoon van Windows.
-#
+# Wijzigingen          : zie CHANGELOG.md, nieuwste bovenaan
 #------------------------------------------------------------------------------------#
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -169,13 +38,20 @@ $stepRun = @{ Active = $false; Steps = @(); Index = 0; NextAt = $null; Reason = 
               Account = $null }
 $maximumLaunchFailures = 5                                                           # log loudly after this many failed launches in a row
 $logFolder = Join-Path $env:LOCALAPPDATA "Roblox\logs"                              # Roblox client log files
-$disconnectPattern = "Sending disconnect with reason: (\d+)"                         # logged on drop (277) and leave (285)
+# Roblox 0.742 stopped logging the numbered line and writes the reason as a sentence:
+#   [FLog::Network] Client has been disconnected with reason: This game has been
+#   disconnected because you have joined a game from another device
+# Matching only the old line left every drop on 0.742 unseen, with the client sitting on
+# its error screen for good. Both are matched, into the same group, so either version works.
+$disconnectPattern = ("Sending disconnect with reason: (?<reason>\d+)" +                # up to 0.741: drop (277), leave (285)
+                      "|Client has been disconnected with reason: (?<reason>[^\r\n]+)")  # 0.742 and later
 $ignoredDisconnectReasons = @()                                                      # never acted on at all; a teleport is recognised, not listed here
 $joinMarker = "Connection accepted"                                                  # logged only once the client is really in the game
 $joinAddressPattern = "Connection accepted from ([0-9.]+\|[0-9]+)"                   # the server it joined, so a rejoin can be compared with it
 $teleportMarker = "SessionTransitionFSM] Teleported."                                # the game moving the player, which no real drop ever logs
 $challengePattern = "challengedByGcs|challengePageLoaded"                            # Roblox refusing the join until a person passes its check
 $rejoinGraceSeconds = 30                                                             # a teleport is back in about 5 s, so this is plenty
+$replacedReasonPattern = "joined a game from another device|^273$"                   # the same account launched again, here or elsewhere
 $migrationWitnesses = 2                                                              # accounts landing on the same new server before it counts as a move
 $relogWaveSize = 3                                                                   # accounts relogging together before it is worth saying so on its own
 $logLivenessSeconds = 120                                                            # a log written more recently than this belongs to a live client
@@ -3280,8 +3156,9 @@ function Update-SessionFromLog($session)
     $reasonIndex = -1
     for ($index = $disconnects.Count - 1; $index -ge 0; $index--)
     {
-        if ($ignoredDisconnectReasons -contains $disconnects[$index].Groups[1].Value) { continue }
-        $reason = $disconnects[$index].Groups[1].Value
+        $candidate = $disconnects[$index].Groups["reason"].Value.Trim()
+        if ($ignoredDisconnectReasons -contains $candidate) { continue }
+        $reason = $candidate
         $reasonIndex = $disconnects[$index].Index
         break
     }
@@ -4647,6 +4524,41 @@ function Invoke-SlowChecks
                     {
                         $logged = Update-SessionFromLog $session                       # $null = nothing new to act on
                         $realDropReason = $null
+
+                        # The same account was launched again, by hand from RAM, and Roblox
+                        # kicked this client for it. The new one is the one wanted, so it is
+                        # adopted and the old one closed. Treated as a drop, it would wait
+                        # out the grace period and then launch a third client, which kicks
+                        # the new one in turn; before that, the old one just sat on its error
+                        # screen until someone closed it.
+                        if ($logged -and $logged.Reason -match $replacedReasonPattern -and -not $launchInFlight)
+                        {
+                            $claimedIds = @($sessions.Values | ForEach-Object { $_.ProcessId } | Where-Object { $_ -ne 0 })
+                            $replacements = @(Get-Process $processName -ErrorAction SilentlyContinue |
+                                Where-Object { $claimedIds -notcontains $_.Id -and $_.MainWindowHandle -ne 0 -and
+                                               $_.StartTime -gt $session.ProcessStartTime -and
+                                               $_.StartTime -gt (Get-Date).AddMinutes(-5) })
+                            if ($replacements.Count -eq 1)
+                            {
+                                $oldProcessId = $session.ProcessId
+                                if ($session.StartedAt)
+                                {
+                                    $session.TotalUpSeconds += [int]((Get-Date) - $session.StartedAt).TotalSeconds
+                                }
+                                Stop-Process -Id $oldProcessId -Force -ErrorAction SilentlyContinue
+                                Write-Log ("$accountName was launched again (PID $($replacements[0].Id)) and Roblox kicked " +
+                                           "PID $oldProcessId for it, so the old one is closed and the new one adopted")
+                                $session.PendingDrop = $null
+                                $session.WindowSeenAt = $null
+                                $session.AppliedRect = $null
+                                Register-AdoptedClient $accountName $replacements[0] "the new client for"
+                                $session.StepsPending = $true                                 # a fresh join, so the setup is due
+                                $logged = $null                                               # handled, not a drop
+                            }
+                            # None here means it was launched on another device; more than
+                            # one cannot be told apart. Either way it is left to the normal
+                            # handling below.
+                        }
 
                         if ($logged -and $logged.Reason)
                         {
