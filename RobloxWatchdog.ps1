@@ -55,7 +55,7 @@ $replacedReasonPattern = "joined a game from another device|^273$"              
 $migrationWitnesses = 2                                                              # accounts landing on the same new server before it counts as a move
 $relogWaveSize = 3                                                                   # accounts relogging together before it is worth saying so on its own
 $logLivenessSeconds = 120                                                            # a log written more recently than this belongs to a live client
-$watchdogVersion = "2.1.0"                                                           # the build stamps the exe with this too, and the exe wins at runtime
+$watchdogVersion = "2.1.1"                                                         # the build stamps the exe with this too, and the exe wins at runtime
 $releaseApiUrl = "https://api.github.com/repos/FloSoftwareDev/roblox-watchdog/releases/latest"
 $releasePageUrl = "https://github.com/FloSoftwareDev/roblox-watchdog/releases/latest"
 $versionCheckHours = 6                                                               # it runs for days at a time, so once at the start is not enough
@@ -92,6 +92,62 @@ $autoRestartWindowMinutes = 10
 # skips the settings dialog and uses what was saved
 $startupArguments = @([Environment]::GetCommandLineArgs() | Select-Object -Skip 1)
 $autoStarted = $startupArguments -contains "-autostart"
+
+# One watchdog at a time. Closing the window only hides it to the tray, so starting it
+# again, or starting a new version over an old one, used to give two watchdogs that each
+# launched every account: a second client per account, and the Log window of either one
+# only showing its own launches. The mutex covers this version and later; the process
+# check also catches older versions, which do not take it. An elevated owner's mutex
+# cannot be opened from a non-elevated copy, which is just as much an answer.
+function Test-OtherWatchdogRunning
+{
+    $createdNew = $false
+    try
+    {
+        $script:singleInstanceMutex = New-Object System.Threading.Mutex($true, "Local\RobloxWatchdog", [ref]$createdNew)
+        if (-not $createdNew)
+        {
+            # A restart after a crash starts before the crashed one is quite gone, so it
+            # waits for it rather than giving up
+            $waitMilliseconds = if ($autoStarted) { 30000 } else { 0 }
+            try   { $createdNew = $script:singleInstanceMutex.WaitOne($waitMilliseconds) }
+            catch [System.Threading.AbandonedMutexException] { $createdNew = $true }    # the owner died holding it
+        }
+    }
+    catch [System.UnauthorizedAccessException]
+    {
+        return $true
+    }
+    if (-not $createdNew) { return $true }
+
+    $ownProcess = [System.Diagnostics.Process]::GetCurrentProcess()
+    if (-not $autoStarted -and $ownProcess.ProcessName -notmatch '^(powershell|pwsh)$')
+    {
+        $others = @(Get-Process -Name $ownProcess.ProcessName -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $ownProcess.Id })
+        if ($others.Count) { return $true }
+    }
+    return $false
+}
+
+if (Test-OtherWatchdogRunning)
+{
+    try
+    {
+        if (-not (Test-Path $settingsFolder)) { New-Item -ItemType Directory -Path $settingsFolder | Out-Null }
+        Add-Content -Path $logFilePath -Encoding UTF8 -Value ("$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') another watchdog " +
+            "is already running, so this one closed without launching anything")
+    }
+    catch { }
+    if (-not $autoStarted)
+    {
+        [System.Windows.Forms.MessageBox]::Show(
+            ("Roblox Watchdog is already running.`r`n`r`nClosing its window keeps it running in the tray, next to " +
+             "the clock: double-click the icon there to bring it back. To start it again, use Exit there first."),
+            "Roblox Watchdog", [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+    }
+    exit
+}
 
 $recentLogLines = New-Object System.Collections.Generic.List[string]                  # what the Log window shows
 

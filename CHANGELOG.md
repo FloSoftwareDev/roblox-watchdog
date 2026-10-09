@@ -2,6 +2,10 @@
 
 Changes to RobloxWatchdog.ps1, newest first. Project Miniwar AFK, programmer FG.
 
+## 022 - 09-10-2026
+
+Only one watchdog runs at a time. Closing the window hides it to the tray, so starting it again, or starting a new version while the old one was still in the tray, gave two watchdogs that each launched every account: a second client per account, and the Log window of either one only showed its own launches. A second copy now says the watchdog is already running and where to find it, writes that to the log file, and closes without launching anything. Older versions do not take the lock, so a running copy with the same exe name is also checked for. A restart after a crash waits for the crashed copy to be gone instead of refusing.
+
 ## 021 - 09-10-2026
 
 Roblox 0.742 no longer logs "Sending disconnect with reason: 277", but "Client has been disconnected with reason:" with the reason as a sentence. Only the old line was being looked for, so not a single drop was seen any more and a kicked client stayed on its error screen for good. Both forms are now recognised. Found by deliberately having an alt join from a second device. When the same account is started again by hand, Roblox kicks the old client. That one stayed on its error screen until someone closed it, and treated as a drop, a third client would come after the grace period and kick the new one in turn. Now the old one is closed and the new one adopted.
