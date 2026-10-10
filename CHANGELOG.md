@@ -2,6 +2,10 @@
 
 Changes to RobloxWatchdog.ps1, newest first. Project Miniwar AFK, programmer FG.
 
+## 023 - 10-10-2026
+
+Leaving the game was no longer noticed on Roblox 0.742. It used to log the numbered disconnect line (285) and close the client; now it logs "Disconnected from server for reason: Player: 285 (DisconnectClientInitiated)", and a client started from the Roblox app does not even close but goes back to the home screen in the same process. So neither the log nor a vanished process said anything, and the account sat on the home screen counted as playing. That line is recognised now, which goes back to the old behaviour: back on its own server within the grace period is left alone, on another server goes through the moved-away check, and still on the home screen after 30 seconds is closed and relaunched. The second-launch kick is recognised by its number as well as its sentence, in case both lines turn up. A teleport between rounds logs the very same line, so a rejoin that hung on the game's loading screen, with no error text, also went unseen and the account stayed there counted as playing (reported by a user). It now gets the same 30 seconds to get back into the game before it is relaunched.
+
 ## 022 - 09-10-2026
 
 Only one watchdog runs at a time. Closing the window hides it to the tray, so starting it again, or starting a new version while the old one was still in the tray, gave two watchdogs that each launched every account: a second client per account, and the Log window of either one only showed its own launches. A second copy now says the watchdog is already running and where to find it, writes that to the log file, and closes without launching anything. Older versions do not take the lock, so a running copy with the same exe name is also checked for. A restart after a crash waits for the crashed copy to be gone instead of refusing.

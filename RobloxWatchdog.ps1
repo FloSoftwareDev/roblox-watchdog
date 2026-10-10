@@ -43,19 +43,31 @@ $logFolder = Join-Path $env:LOCALAPPDATA "Roblox\logs"                          
 #   disconnected because you have joined a game from another device
 # Matching only the old line left every drop on 0.742 unseen, with the client sitting on
 # its error screen for good. Both are matched, into the same group, so either version works.
+#
+# Leaving the game has its own line, and on 0.742 leaving does not always close the
+# client: one started from the Roblox app goes back to the home screen in the same
+# process, so neither the log nor a vanished process said anything and the account sat
+# there counted as playing:
+#   [DFLog::RbxTransportDummyClient] Disconnected from server for reason: Player: 285
+#   (DisconnectClientInitiated)
+# The old numbered line was logged for a leave too (285), so matching this one goes back
+# to how it was: a rejoin within the grace period is left alone, anything else relaunched.
+# A teleport logs this same line, and a teleport that stalls sits on the game's own
+# loading screen with no error text, so missing it left those accounts stuck for good.
 $disconnectPattern = ("Sending disconnect with reason: (?<reason>\d+)" +                # up to 0.741: drop (277), leave (285)
-                      "|Client has been disconnected with reason: (?<reason>[^\r\n]+)")  # 0.742 and later
+                      "|Client has been disconnected with reason: (?<reason>[^\r\n]+)" + # 0.742 and later, a drop or a kick
+                      "|Disconnected from server for reason: (?<reason>[^\r\n]+)")      # 0.742 and later, leaving the game
 $ignoredDisconnectReasons = @()                                                      # never acted on at all; a teleport is recognised, not listed here
 $joinMarker = "Connection accepted"                                                  # logged only once the client is really in the game
 $joinAddressPattern = "Connection accepted from ([0-9.]+\|[0-9]+)"                   # the server it joined, so a rejoin can be compared with it
 $teleportMarker = "SessionTransitionFSM] Teleported."                                # the game moving the player, which no real drop ever logs
 $challengePattern = "challengedByGcs|challengePageLoaded"                            # Roblox refusing the join until a person passes its check
 $rejoinGraceSeconds = 30                                                             # a teleport is back in about 5 s, so this is plenty
-$replacedReasonPattern = "joined a game from another device|^273$"                   # the same account launched again, here or elsewhere
+$replacedReasonPattern = "joined a game from another device|(^|\D)273(\D|$)"          # the same account launched again, here or elsewhere
 $migrationWitnesses = 2                                                              # accounts landing on the same new server before it counts as a move
 $relogWaveSize = 3                                                                   # accounts relogging together before it is worth saying so on its own
 $logLivenessSeconds = 120                                                            # a log written more recently than this belongs to a live client
-$watchdogVersion = "2.1.1"                                                         # the build stamps the exe with this too, and the exe wins at runtime
+$watchdogVersion = "2.1.2"                                                         # the build stamps the exe with this too, and the exe wins at runtime
 $releaseApiUrl = "https://api.github.com/repos/FloSoftwareDev/roblox-watchdog/releases/latest"
 $releasePageUrl = "https://github.com/FloSoftwareDev/roblox-watchdog/releases/latest"
 $versionCheckHours = 6                                                               # it runs for days at a time, so once at the start is not enough
